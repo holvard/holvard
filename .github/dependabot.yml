@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Proposes updates for pinned dependencies. For SHA-pinned actions it also
+# updates the tag comment. age (AGE_VERSION/AGE_SHA256 in ci.yml) and the Rust
+# toolchain (rust-toolchain.toml) are bumped by hand. The cooldown waits a week
+# after a release, so a compromised version is likely caught before we take it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: pip
+    directories:
+      - /scripts/cross-check
+      - /scripts/reuse
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7

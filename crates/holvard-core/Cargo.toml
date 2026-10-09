@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "holvard-core"
+description = "Holvard core: vault encryption with age, SLIP-39 key splitting and card encoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

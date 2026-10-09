@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[workspace]
+resolver = "3"
+members = ["crates/holvard-core", "crates/holvard-cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/holvard/holvard"
+homepage = "https://holvard.dev"
+authors = ["Holvard contributors"]
+
+[workspace.dependencies]
+holvard-core = { path = "crates/holvard-core", version = "0.0.0" }
+
+# Everything is deny, not warn: CI builds with -D warnings, so a warning
+# here would pass locally and fail in CI.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = "symbols"

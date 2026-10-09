@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Licensing for files that can't carry an SPDX header (Markdown, lock and
+# generated files). Source files carry their own header; `reuse lint` checks
+# that every file is covered, and scripts/check-spdx.sh that each header
+# matches its directory's license.
+version = 1
+
+[[annotations]]
+path = ["spec/**", "docs/**"]
+SPDX-FileCopyrightText = "2026 Holvard contributors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+[[annotations]]
+path = "test-vectors/**"
+SPDX-FileCopyrightText = "2026 Holvard contributors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "*.md"
+SPDX-FileCopyrightText = "2026 Holvard contributors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+[[annotations]]
+path = [
+    ".gitignore",
+    "Cargo.lock",
+    "scripts/*/requirements.txt",
+]
+SPDX-FileCopyrightText = "2026 Holvard contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"
