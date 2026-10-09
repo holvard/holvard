@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The REUSE tool, used by CI to check every file has license information.
+# Edit this file, then regenerate the pinned, hashed requirements.txt with:
+#   pip-compile --allow-unsafe --generate-hashes --strip-extras requirements.in
+# (pip-tools, under Python 3.12 to match CI)
+reuse[charset-normalizer]==6.2.0

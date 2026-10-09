@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Pinned so release builds are reproducible. Bump deliberately, in its own commit.
+[toolchain]
+channel = "1.94.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

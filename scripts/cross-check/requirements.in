@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Trezor's SLIP-39 reference implementation, used by scripts/cross-check.sh.
+# Edit this file, then regenerate the pinned, hashed requirements.txt with:
+#   pip-compile --allow-unsafe --generate-hashes --strip-extras requirements.in
+# (pip-tools, under Python 3.12 to match CI)
+shamir-mnemonic[cli]==0.3.0

@@ -1,0 +1,7 @@
+/target
+*.age
+*.pdf
+# Sample vaults and cards in test-vectors/ are meant to be committed.
+!test-vectors/**
+.DS_Store
+CLAUDE.local.md
