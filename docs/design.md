@@ -64,8 +64,8 @@ flowchart TD
 5. **On release**, Holvard Cloud gives share 1 to the beneficiary. The
    beneficiary combines it with their own card in the recovery page from
    their kit, which runs offline in the browser. Holvard never sees the
-   card or the vault's contents, as long as the recovery page comes from the
-   kit or a signed release (see "The browser is a trust boundary").
+   card or the vault's contents, because the recovery page never comes
+   from Holvard at that moment (see "The browser is a trust boundary").
 6. **Without Holvard**, the beneficiary and the backup holder can recover
    together, with no involvement from Holvard at all.
 
@@ -116,11 +116,25 @@ from acting early.
   the owner's secret. Owner-side encryption therefore runs in the CLI
   first; any browser app will ship as signed, reproducible static releases
   from a separate origin, never served by the keeper server.
-  The recovery page follows the same rule. It combines share 1 with the
-  heir's card, so code Holvard served there could capture the card and give
-  Holvard two shares. It ships only as a signed, reproducible static
-  release, never from holvard-server; the offline copy in the kit is the
-  preferred path, and practice drills use only that copy.
+- **There is no hosted recovery page at launch.** The recovery page
+  combines share 1 with the heir's card, so code Holvard served there could
+  capture the card and give Holvard two shares. A browser does not check
+  signatures on a web page: whoever serves the page when the heir opens it
+  decides what runs. Recovery therefore never depends on code from Holvard
+  at that moment:
+  1. The offline recovery page in the kit. This is the main path, and the
+     only one used for practice drills.
+  2. The same page as a signed download from several independent places:
+     GitHub and Codeberg releases and holvard.dev, each with a minisign
+     signature and a published hash.
+  3. Standard tools alone: Trezor's `shamir` CLI combines the cards, and the
+     official `age` tool decrypts the vault (if the secret unlocks the vault
+     as an age passphrase; see "Open").
+
+  An online copy may come later as a last resort: offered only after a
+  release, hosted away from Holvard Cloud, and showing its own hash. Even
+  then it means trusting whoever serves it at that moment, and the threat
+  model will say so.
 - **KMS wrapping and decrypt alerts limit damage; they do not enforce
   verification.** The keeper's API can only encrypt shares, a separate
   release worker can only decrypt them, every decrypt alerts the owner and
@@ -151,7 +165,7 @@ already made can never be taken back.
 | Test vectors (`test-vectors/`) | Sample cards and vaults with expected results | CC0-1.0 |
 | `holvard-core` | Secret generation, encryption with age, SLIP-39 split and combine, card encoding | Apache-2.0 OR MIT |
 | `holvard` CLI | `init`, `split`, `cards`, `recover`, `seal` | Apache-2.0 OR MIT |
-| Recovery page | One offline HTML file with camera QR scanning, checked against the test vectors; a copy in every kit, online only as a signed static release | Apache-2.0 OR MIT |
+| Recovery page | One offline HTML file with camera QR scanning, checked against the test vectors; a copy in every kit and signed downloads, no hosted copy at launch | Apache-2.0 OR MIT |
 | `holvard-server` (later) | The keeper: shares, vault copies, check-ins, waiting period, veto, claims | AGPL-3.0-only |
 | Mobile apps (later) | Native apps on the same core | Apache-2.0 OR MIT |
 

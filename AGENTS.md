@@ -32,10 +32,13 @@ Design: docs/design.md.
   can. The guarantee is that Holvard alone cannot.
 - Owner-side encryption runs in the CLI. Any browser app is served only as
   signed static releases, never by holvard-server.
-- The recovery page follows the same rule: a signed, reproducible static
-  release, never served by holvard-server. The offline copy in the kit is
-  the preferred path, and practice drills use only that copy. Otherwise
-  Holvard could capture an heir's card and hold two shares.
+- No hosted recovery page at launch. The recovery page combines share 1
+  with an heir's card, so code Holvard serves could capture the card and
+  give Holvard two shares. It ships only in the kit and as signed downloads
+  (GitHub and Codeberg releases, holvard.dev), never served by
+  holvard-server or any Holvard Cloud origin. Practice drills use only the
+  kit copy. Recovery must also work with standard tools alone: Trezor's
+  `shamir` CLI and the official `age` tool.
 - New shares of the same secret do not revoke old ones. Revocation means a
   new secret and re-encryption; never claim otherwise in code or docs.
 - Don't add dependencies without asking me first.
