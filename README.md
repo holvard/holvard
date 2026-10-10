@@ -81,4 +81,13 @@ The future `holvard-server` will be AGPL-3.0-only.
 
 The design is described in [docs/design.md](docs/design.md).
 
+## Verifying releases
+
+Releases are signed with [minisign](https://jedisct1.github.io/minisign/).
+The public key, also published in [docs/release.md](docs/release.md), is:
+
+```
+RWTLYuX/gmDZ/xZ7Yy6LiHTSYLTu0kyazLKFiyJMVDuJnCsqndQzQJne
+```
+
 "Holvard" is a trademark; see [TRADEMARKS.md](TRADEMARKS.md).

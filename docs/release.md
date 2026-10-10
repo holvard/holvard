@@ -17,7 +17,11 @@ minisign -G -p holvard.pub -s holvard.key -c "Holvard release signing key"
 - If the key is lost or compromised, publish a signed (if possible) notice and
   a new key in all of those places.
 
-Public key: _not generated yet_.
+Public key (key ID `FFD96082FFE562CB`, created 10 October 2026):
+
+```
+RWTLYuX/gmDZ/xZ7Yy6LiHTSYLTu0kyazLKFiyJMVDuJnCsqndQzQJne
+```
 
 Signing a release:
 
@@ -29,7 +33,7 @@ minisign -S -s holvard.key -m SHA256SUMS
 Verifying:
 
 ```sh
-minisign -V -p holvard.pub -m SHA256SUMS
+minisign -V -P RWTLYuX/gmDZ/xZ7Yy6LiHTSYLTu0kyazLKFiyJMVDuJnCsqndQzQJne -m SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
