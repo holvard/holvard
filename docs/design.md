@@ -128,8 +128,8 @@ from acting early.
      GitHub and Codeberg releases and holvard.dev, each with a minisign
      signature and a published hash.
   3. Standard tools alone: Trezor's `shamir` CLI combines the cards, and the
-     official `age` tool decrypts the vault (if the secret unlocks the vault
-     as an age passphrase; see "Open").
+     official `age` tool decrypts the vault, with the secret as its
+     passphrase (see "Technical decisions").
 
   An online copy may come later as a last resort: offered only after a
   release, hosted away from Holvard Cloud, and showing its own hash. Even
@@ -185,6 +185,34 @@ Contributions are accepted under the Developer Certificate of Origin
 - Cards carry a QR code, the SLIP-39 words, the format version and a
   vault fingerprint. Format version 1 is frozen once published; later
   versions only add.
+- **The secret unlocks the vault as an age passphrase.** The passphrase is
+  the lowercase hex encoding of the SLIP-39 master secret, 64 characters,
+  never chosen by a person.
+  - Recovery needs only standard tools: Trezor's `shamir recover` prints
+    the secret as hex, and `age -d` accepts it as the passphrase, with no
+    conversion in between. Using the secret as an age X25519 or
+    post-quantum identity also works, but needs a hex-to-Bech32 step that
+    no standard tool performs.
+  - It is symmetric encryption, so vault copies kept for decades are not
+    exposed to future quantum computers, unlike an X25519 recipient.
+  - The browser recovery page needs only scrypt and ChaCha20-Poly1305.
+  - Trade-off: the age format forbids mixing a passphrase with other
+    recipients, so a vault has exactly one key. The design never needs
+    more.
+- **The scrypt work factor is age's default, 18, and never above 20.** The
+  secret has 256 bits of entropy, so scrypt adds no meaningful protection;
+  keeping the default keeps the format plain age. ReMemory uses the same
+  default in its browser recovery without reported problems; JavaScript
+  scrypt at 18 takes about 0.7 seconds and 256 MiB on a laptop. The
+  browser age library (typage) refuses factors above 20. Each vault stores
+  its factor in the header, so a lower one can be chosen later, for
+  example if the Phase 2 drill shows slow phones, without breaking
+  existing vaults.
+- **The SLIP-39 passphrase is empty.** In SLIP-39 a wrong passphrase
+  silently yields a different, valid-looking secret, which heirs could not
+  diagnose. A passphrase written on the cards would add nothing, and one
+  known only to the owner would prevent recovery. Extra holders are
+  modelled with thresholds and groups instead.
 - Every vault Holvard writes must open with the official age tool, and
   every card set must recover with the SLIP-39 reference implementation.
   Both directions are checked in CI.
@@ -198,7 +226,6 @@ Contributions are accepted under the Developer Certificate of Origin
 
 | Question | Current leaning |
 | --- | --- |
-| How the split secret unlocks the age file: an X25519 identity or an age passphrase | Passphrase: purely symmetric, and any age tool can recover without Holvard |
 | SLIP-39 words exist only in English | Instructions in the holder's language on the card; autocomplete (never auto-correct) in the recovery page |
 | What happens to Holvard's share when a subscription lapses | See "Changes over time" |
 
