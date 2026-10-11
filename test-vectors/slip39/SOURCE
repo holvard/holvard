@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: CC0-1.0
+#
+# Upstream of the files in this directory, copied byte for byte.
+# Checked by scripts/check-upstream.sh: offline against the hashes below on
+# every CI run, and against upstream's current master weekly.
+#
+# The wordlist is also identical to satoshilabs/slips slip-0039/wordlist.txt.
+#
+# repository: https://github.com/trezor/python-shamir-mnemonic
+# commit:     17fcce14736afe498871d3018e4fa9330443471a (copied 2026-10-11)
+# license:    MIT (SatoshiLabs, 2019); see REUSE.toml
+#
+# local file    upstream path                   sha256
+vectors.json    vectors.json                    13ebecebdd869dd2bc2cdf69e7ce3a158cf106cac76c39d17682b1c6cdabbdc4
+wordlist.txt    shamir_mnemonic/wordlist.txt    bcc4555340332d169718aed8bf31dd9d5248cb7da6e5d355140ef4f1e601eec3

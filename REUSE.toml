@@ -17,6 +17,13 @@ path = "test-vectors/**"
 SPDX-FileCopyrightText = "2026 Holvard contributors"
 SPDX-License-Identifier = "CC0-1.0"
 
+# Copied from trezor/python-shamir-mnemonic; see test-vectors/slip39/SOURCE.
+# Listed after test-vectors/**, so this annotation wins for these files.
+[[annotations]]
+path = ["test-vectors/slip39/vectors.json", "test-vectors/slip39/wordlist.txt"]
+SPDX-FileCopyrightText = "2019 SatoshiLabs"
+SPDX-License-Identifier = "MIT"
+
 [[annotations]]
 path = "*.md"
 SPDX-FileCopyrightText = "2026 Holvard contributors"

@@ -68,6 +68,8 @@ jobs:
         run: reuse lint
       - name: SPDX headers match their directories
         run: scripts/check-spdx.sh
+      - name: Vendored SLIP-39 files match test-vectors/slip39/SOURCE
+        run: scripts/check-upstream.sh
 
   deny:
     name: cargo deny
@@ -123,6 +125,19 @@ jobs:
         run: pip install --require-hashes -r scripts/cross-check/requirements.txt
       - run: cargo build --locked --release
       - run: scripts/cross-check.sh
+
+  upstream:
+    name: Upstream SLIP-39 files unchanged
+    # Weekly (and on demand): fails if Trezor changed vectors.json or the
+    # wordlist on master, so the vendored copies can be reviewed and updated.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/check-upstream.sh --remote
 
   dco:
     name: DCO sign-off
