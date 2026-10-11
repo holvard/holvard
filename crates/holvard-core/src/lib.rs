@@ -12,6 +12,8 @@
 // overflow must be handled explicitly, with `get`, `checked_*` and the like.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+pub mod slip39;
+
 /// Version of the Holvard card and vault format this crate implements.
 ///
 /// Version 1 is frozen once the spec is published; later versions only add.

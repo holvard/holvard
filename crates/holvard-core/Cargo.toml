@@ -14,6 +14,10 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+hmac = "0.13"
+pbkdf2 = "0.13"
+sha2 = "0.11"
+zeroize = "1.9"
 
 [lints]
 workspace = true
