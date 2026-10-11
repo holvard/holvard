@@ -61,6 +61,83 @@ pub(crate) fn interpolate(x: u8, points: &[(u8, &[u8])]) -> Result<Zeroizing<Vec
     Ok(result)
 }
 
+/// One share: its index and its value, wiped when dropped.
+pub(crate) type IndexedShare = (u8, Zeroizing<Vec<u8>>);
+
+/// Smallest secret SLIP-39 allows: 128 bits.
+const MIN_SECRET_LENGTH: usize = 16;
+/// Most shares a set (or group) can have: indices are 4 bits.
+const MAX_SHARE_COUNT: u8 = 16;
+
+/// `count` bytes from the operating system's random generator.
+fn random_bytes(count: usize) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut bytes = Zeroizing::new(vec![0u8; count]);
+    getrandom::fill(&mut bytes).map_err(|_| Error::RandomnessUnavailable)?;
+    Ok(bytes)
+}
+
+/// `SplitSecret` from SLIP-39: `count` shares with indices 0 to count - 1,
+/// any `threshold` of which recover `secret`.
+///
+/// In plain words: the secret is placed at index 255 and a digest of it at
+/// index 254 of a polynomial whose other `threshold - 2` points are random
+/// (at indices 0 to threshold - 3). Each share is the polynomial's value at
+/// its own index. Any `threshold` shares pin the polynomial down; fewer
+/// leave the secret completely undetermined.
+pub(crate) fn split_secret(
+    threshold: u8,
+    count: u8,
+    secret: &[u8],
+) -> Result<Vec<IndexedShare>, Error> {
+    if threshold == 0 || threshold > count || count > MAX_SHARE_COUNT {
+        return Err(Error::InvalidParameters);
+    }
+    if secret.len() < MIN_SECRET_LENGTH || !secret.len().is_multiple_of(2) {
+        return Err(Error::InvalidSecretLength);
+    }
+    if threshold == 1 {
+        return Ok((0..count)
+            .map(|i| (i, Zeroizing::new(secret.to_vec())))
+            .collect());
+    }
+
+    // Digest D = first 4 bytes of HMAC-SHA256(key = R, message = secret),
+    // followed by R, a random string of the remaining length.
+    let random_part = random_bytes(
+        secret
+            .len()
+            .checked_sub(DIGEST_LENGTH)
+            .ok_or(Error::InvalidLength)?,
+    )?;
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&random_part)
+        .map_err(|_| Error::InvalidLength)?;
+    mac.update(secret);
+    // The full tag is wiped too, though only 4 bytes are used.
+    let tag: Zeroizing<[u8; 32]> = Zeroizing::new(mac.finalize().into_bytes().into());
+    let mut digest = Zeroizing::new(Vec::with_capacity(secret.len()));
+    digest.extend_from_slice(tag.get(..DIGEST_LENGTH).ok_or(Error::InvalidLength)?);
+    digest.extend_from_slice(&random_part);
+
+    // The first threshold - 2 shares are random and returned as they are.
+    let random_count = threshold.saturating_sub(2);
+    let mut shares = Vec::with_capacity(usize::from(count));
+    for index in 0..random_count {
+        shares.push((index, random_bytes(secret.len())?));
+    }
+
+    // The rest are computed from the polynomial through the random shares,
+    // the digest and the secret.
+    let mut points: Vec<(u8, &[u8])> = shares.iter().map(|(i, v)| (*i, v.as_slice())).collect();
+    points.push((DIGEST_INDEX, &digest));
+    points.push((SECRET_INDEX, secret));
+    let mut computed = Vec::with_capacity(usize::from(count.saturating_sub(random_count)));
+    for index in random_count..count {
+        computed.push((index, interpolate(index, &points)?));
+    }
+    shares.extend(computed);
+    Ok(shares)
+}
+
 /// `RecoverSecret` from SLIP-39: with threshold 1 the single share is the
 /// secret; otherwise interpolate the secret at index 255 and the digest at
 /// index 254, and accept the secret only if the digest matches.
@@ -90,9 +167,21 @@ pub(crate) fn recover_secret(
     let mut mac =
         <Hmac<Sha256> as KeyInit>::new_from_slice(random_part).map_err(|_| Error::InvalidLength)?;
     mac.update(&secret);
-    // Compares the first 4 bytes in constant time.
-    mac.verify_truncated_left(digest)
-        .map_err(|_| Error::DigestMismatch)?;
+    // The tag is computed into a wiped buffer (the library's own verify
+    // leaves its copy unwiped), and its first 4 bytes are compared with the
+    // stored digest in constant time.
+    let tag: Zeroizing<[u8; 32]> = Zeroizing::new(mac.finalize().into_bytes().into());
+    let expected = tag.get(..DIGEST_LENGTH).ok_or(Error::InvalidLength)?;
+    if digest.len() != DIGEST_LENGTH {
+        return Err(Error::InvalidLength);
+    }
+    let difference = expected
+        .iter()
+        .zip(digest.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    if difference != 0 {
+        return Err(Error::DigestMismatch);
+    }
     Ok(secret)
 }
 
@@ -169,6 +258,113 @@ mod tests {
             recover_secret(1, &[(2, &a), (0, &b)]),
             Err(Error::WrongNumberOfShares)
         );
+    }
+
+    /// Every way to choose `k` of the items, in order.
+    fn choose<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
+        match (k, items.split_first()) {
+            (0, _) => vec![Vec::new()],
+            (_, None) => Vec::new(),
+            (_, Some((first, rest))) => {
+                let mut with_first: Vec<Vec<T>> = choose(rest, k.saturating_sub(1))
+                    .into_iter()
+                    .map(|mut c| {
+                        c.insert(0, first.clone());
+                        c
+                    })
+                    .collect();
+                with_first.extend(choose(rest, k));
+                with_first
+            }
+        }
+    }
+
+    const SECRET_16: &str = "bb54aac4b89dc868ba37d9cc21b2cece";
+
+    #[test]
+    fn every_threshold_sized_subset_recovers_the_secret() -> Result<(), Error> {
+        let secret = bytes(SECRET_16);
+        for (threshold, count) in [(2u8, 3u8), (3, 5), (5, 5), (2, 16)] {
+            let shares = split_secret(threshold, count, &secret)?;
+            assert_eq!(shares.len(), usize::from(count));
+            for subset in choose(&shares, usize::from(threshold)) {
+                let points: Vec<(u8, &[u8])> =
+                    subset.iter().map(|(i, v)| (*i, v.as_slice())).collect();
+                assert_eq!(
+                    *recover_secret(threshold, &points)?,
+                    secret,
+                    "{threshold}-of-{count}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shares_have_indices_0_to_count_minus_1() -> Result<(), Error> {
+        let indices: Vec<u8> = split_secret(3, 5, &bytes(SECRET_16))?
+            .iter()
+            .map(|(i, _)| *i)
+            .collect();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn threshold_one_shares_are_copies_of_the_secret() -> Result<(), Error> {
+        let secret = bytes(SECRET_16);
+        for (_, value) in split_secret(1, 3, &secret)? {
+            assert_eq!(*value, secret);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn two_splits_of_one_secret_differ() -> Result<(), Error> {
+        let secret = bytes(SECRET_16);
+        let a = split_secret(2, 3, &secret)?;
+        let b = split_secret(2, 3, &secret)?;
+        assert!(a.iter().zip(b.iter()).any(|((_, x), (_, y))| x != y));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_split_settings_are_refused() {
+        let secret = bytes(SECRET_16);
+        assert_eq!(
+            split_secret(0, 3, &secret).map(|_| ()),
+            Err(Error::InvalidParameters)
+        );
+        assert_eq!(
+            split_secret(4, 3, &secret).map(|_| ()),
+            Err(Error::InvalidParameters)
+        );
+        assert_eq!(
+            split_secret(2, 17, &secret).map(|_| ()),
+            Err(Error::InvalidParameters)
+        );
+        let short = secret.get(..15).unwrap_or_default();
+        assert_eq!(
+            split_secret(2, 3, short).map(|_| ()),
+            Err(Error::InvalidSecretLength)
+        );
+        assert_eq!(
+            split_secret(2, 3, &[0u8; 17]).map(|_| ()),
+            Err(Error::InvalidSecretLength)
+        );
+    }
+
+    // SHA-256's internal state, and with it HMAC-SHA256's keyed state, is
+    // wiped on drop only with the `zeroize` features of hmac and sha2
+    // (crates/holvard-core/Cargo.toml). HMAC-SHA256 is two SHA-256 cores
+    // (inner and outer pad) plus a block buffer, each wiping itself; `Hmac`
+    // does not carry the ZeroizeOnDrop marker, but `Sha256` does, and the
+    // digest crate grants it only when both its core and its buffer wipe
+    // on drop. This fails to compile if the features are ever lost.
+    #[test]
+    fn sha256_state_is_wiped_on_drop() {
+        fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wipes_on_drop::<Sha256>();
     }
 
     // Two points with the same index would divide by zero in the Lagrange

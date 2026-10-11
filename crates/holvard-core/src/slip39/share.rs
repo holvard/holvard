@@ -8,7 +8,7 @@ use core::fmt;
 use zeroize::Zeroizing;
 
 use super::Error;
-use super::words::{checksum_is_valid, index_of};
+use super::words::{MAX_WORD_LENGTH, checksum_is_valid, create_checksum, index_of, word_at};
 
 /// Bits per word: each word is an index into the 1024-word list.
 const BITS_PER_WORD: usize = 10;
@@ -77,16 +77,76 @@ impl Share {
         public_fields_equal && value_difference == 0
     }
 
+    /// Encodes this share as a mnemonic, the reverse of
+    /// [`Share::from_mnemonic`].
+    pub(crate) fn to_mnemonic(&self) -> Result<Zeroizing<String>, Error> {
+        let in_range = self.identifier < 1 << 15
+            && self.iteration_exponent <= 15
+            && self.group_index <= 15
+            && self.member_index <= 15
+            && (1..=16).contains(&self.group_threshold)
+            && (1..=16).contains(&self.group_count)
+            && (1..=16).contains(&self.member_threshold);
+        if !in_range {
+            return Err(Error::InvalidParameters);
+        }
+        // The same rule as split_secret: at least 128 bits, in 16-bit steps.
+        if self.value.len() < 16 || !self.value.len().is_multiple_of(2) {
+            return Err(Error::InvalidSecretLength);
+        }
+
+        // Words 0-1: identifier (15 bits), extendable flag (1), exponent (4).
+        let w0 = self.identifier.wrapping_shr(5);
+        let w1 = (self.identifier & 0x1f).wrapping_shl(5)
+            | u16::from(self.extendable).wrapping_shl(4)
+            | u16::from(self.iteration_exponent);
+        // Words 2-3: five 4-bit fields; thresholds and count are stored minus 1.
+        let groups = u32::from(self.group_index).wrapping_shl(16)
+            | u32::from(self.group_threshold.wrapping_sub(1)).wrapping_shl(12)
+            | u32::from(self.group_count.wrapping_sub(1)).wrapping_shl(8)
+            | u32::from(self.member_index).wrapping_shl(4)
+            | u32::from(self.member_threshold.wrapping_sub(1));
+        let w2 = u16::try_from(groups.wrapping_shr(10)).map_err(|_| Error::InvalidParameters)?;
+        let w3 = u16::try_from(groups & 0x3ff).map_err(|_| Error::InvalidParameters)?;
+
+        // Every wiped buffer below is allocated once at its final size:
+        // growing a Vec reallocates and frees the old buffer unwiped.
+        let value_words = encode_value(&self.value)?;
+        let mut data = Zeroizing::new(Vec::with_capacity(value_words.len().saturating_add(4)));
+        data.extend_from_slice(&[w0, w1, w2, w3]);
+        data.extend_from_slice(&value_words);
+
+        let customization: &[u8] = if self.extendable {
+            b"shamir_extendable"
+        } else {
+            b"shamir"
+        };
+        let checksum = create_checksum(customization, &data);
+
+        // At most 8 letters and a space per word.
+        let word_count = data.len().saturating_add(checksum.len());
+        let mut mnemonic = Zeroizing::new(String::with_capacity(
+            word_count.saturating_mul(MAX_WORD_LENGTH.saturating_add(1)),
+        ));
+        for (position, &index) in data.iter().chain(checksum.iter()).enumerate() {
+            if position > 0 {
+                mnemonic.push(' ');
+            }
+            mnemonic.push_str(&word_at(index).ok_or(Error::InvalidParameters)?);
+        }
+        Ok(mnemonic)
+    }
+
     /// Decodes one mnemonic, following "Format of the share mnemonic" in
     /// SLIP-39.
     pub(crate) fn from_mnemonic(mnemonic: &str) -> Result<Share, Error> {
         // The word numbers are as secret as the words, so wipe them too.
-        let indices: Zeroizing<Vec<u16>> = Zeroizing::new(
-            mnemonic
-                .split_whitespace()
-                .map(|word| index_of(word).ok_or(Error::InvalidWord))
-                .collect::<Result<Vec<u16>, Error>>()?,
-        );
+        // Count the words first so the buffer never has to grow.
+        let mut indices: Zeroizing<Vec<u16>> =
+            Zeroizing::new(Vec::with_capacity(mnemonic.split_whitespace().count()));
+        for word in mnemonic.split_whitespace() {
+            indices.push(index_of(word).ok_or(Error::InvalidWord)?);
+        }
         if indices.len() < MIN_WORDS {
             return Err(Error::TooShort);
         }
@@ -160,6 +220,41 @@ impl Share {
     }
 }
 
+/// Turns bytes into 10-bit words: left-pads with zero bits to a multiple
+/// of 10, then reads 10 bits at a time, most significant first. The
+/// reverse of [`decode_value`].
+fn encode_value(value: &[u8]) -> Result<Zeroizing<Vec<u16>>, Error> {
+    let bit_count = value.len().checked_mul(8).ok_or(Error::InvalidLength)?;
+    let padding = BITS_PER_WORD
+        .checked_sub(
+            bit_count
+                .checked_rem(BITS_PER_WORD)
+                .ok_or(Error::InvalidLength)?,
+        )
+        .ok_or(Error::InvalidLength)?
+        .checked_rem(BITS_PER_WORD)
+        .ok_or(Error::InvalidLength)?;
+    let bits = core::iter::repeat_n(0u16, padding).chain(value.iter().flat_map(|&byte| {
+        (0..8u32)
+            .rev()
+            .map(move |i| u16::from(byte.wrapping_shr(i) & 1))
+    }));
+    let word_count = bit_count
+        .checked_add(padding)
+        .and_then(|bits| bits.checked_div(BITS_PER_WORD))
+        .ok_or(Error::InvalidLength)?;
+    let mut words = Zeroizing::new(Vec::with_capacity(word_count));
+    let mut word = 0u16;
+    for (count, bit) in (1usize..).zip(bits) {
+        word = word.wrapping_shl(1) | bit;
+        if count.checked_rem(BITS_PER_WORD) == Some(0) {
+            words.push(word);
+            word = 0;
+        }
+    }
+    Ok(words)
+}
+
 /// Turns 10-bit words into bytes: drops `padding` leading bits, which must
 /// all be zero, then packs the rest 8 bits at a time, most significant
 /// first.
@@ -172,7 +267,13 @@ fn decode_value(words: &[u16], padding: usize) -> Result<Zeroizing<Vec<u8>>, Err
     if bits.by_ref().take(padding).any(|bit| bit != 0) {
         return Err(Error::InvalidPadding);
     }
-    let mut value = Zeroizing::new(Vec::new());
+    let byte_count = words
+        .len()
+        .checked_mul(BITS_PER_WORD)
+        .and_then(|bits| bits.checked_sub(padding))
+        .and_then(|bits| bits.checked_div(8))
+        .ok_or(Error::InvalidLength)?;
+    let mut value = Zeroizing::new(Vec::with_capacity(byte_count));
     let mut byte = 0u8;
     for (count, bit) in (1usize..).zip(bits) {
         byte = byte.wrapping_shl(1) | bit;
@@ -225,6 +326,60 @@ mod tests {
         assert_eq!(share.member_index, 0);
         assert_eq!(share.member_threshold, 2);
         assert_eq!(hex(&share.value), "a5a69aa82af0f8068a01d8e8c095ddf3");
+        Ok(())
+    }
+
+    // Decoding a card and encoding it again must give back every word:
+    // vector 4 (128 bits, not extendable, exponent 2), vector 43 (128 bits,
+    // extendable) and a 256-bit card made with Trezor's `shamir` tool.
+    #[test]
+    fn encoding_a_decoded_card_gives_back_the_same_words() -> Result<(), Error> {
+        for card in [
+            "shadow pistol academic always adequate wildlife fancy gross oasis cylinder mustang wrist rescue view short owner flip making coding armed",
+            "enemy favorite academic acid cowboy phrase havoc level response walnut budget painting inside trash adjust froth kitchen learn tidy punish",
+            "grocery lilac academic acid alpha artist camera worthy listen veteran fiscal execute grasp involve blanket warmth pancake should ounce density branch starting loan puny numb priority alarm thorn ruin unusual duckling furl triumph",
+        ] {
+            assert_eq!(Share::from_mnemonic(card)?.to_mnemonic()?.as_str(), card);
+        }
+        Ok(())
+    }
+
+    fn share_with_value(length: usize) -> Share {
+        Share {
+            identifier: 1,
+            extendable: true,
+            iteration_exponent: 0,
+            group_index: 0,
+            group_threshold: 1,
+            group_count: 1,
+            member_index: 0,
+            member_threshold: 1,
+            value: Zeroizing::new(vec![0u8; length]),
+        }
+    }
+
+    // The encoder applies the same length rule as split_secret: at least
+    // 16 bytes, in whole 2-byte steps.
+    #[test]
+    fn a_share_value_of_the_wrong_length_cannot_be_encoded() {
+        for length in [0, 15, 17] {
+            assert_eq!(
+                share_with_value(length).to_mnemonic().err(),
+                Some(Error::InvalidSecretLength),
+                "length {length}"
+            );
+        }
+        assert!(share_with_value(16).to_mnemonic().is_ok());
+    }
+
+    // A growing Vec reallocates and frees its old buffer unwiped, so wiped
+    // buffers must be allocated once at their final size.
+    #[test]
+    fn encoded_value_words_are_allocated_once_at_their_final_size() -> Result<(), Error> {
+        for length in [16, 32] {
+            let words = encode_value(&vec![0xa5; length])?;
+            assert_eq!(words.capacity(), words.len(), "{length}-byte value");
+        }
         Ok(())
     }
 

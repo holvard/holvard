@@ -38,10 +38,120 @@ impl fmt::Debug for MasterSecret {
     }
 }
 
+/// One card's words. Wiped from memory when dropped, and never printed.
+pub struct Mnemonic(Zeroizing<String>);
+
+impl Mnemonic {
+    /// The words, separated by single spaces.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Mnemonic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Mnemonic(<redacted>)")
+    }
+}
+
+/// One group in a set of cards: how many of its `count` cards are needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Group {
+    /// Cards needed from this group (1 to `count`).
+    pub threshold: u8,
+    /// Cards in this group (1 to 16).
+    pub count: u8,
+}
+
+/// Creates a set of cards for `master_secret`, following "Generating the
+/// shares" in SLIP-39: `group_threshold` of the `groups` are needed, and
+/// within each group its own threshold of cards.
+///
+/// Returns the cards group by group. Holvard always passes the empty
+/// passphrase; other values exist for the reference and other SLIP-39
+/// software.
+///
+/// # Errors
+///
+/// Returns an error if the settings are outside what SLIP-39 allows, the
+/// secret is not 128 bits or more in whole 16-bit steps, the passphrase is
+/// not printable ASCII, or the random generator fails.
+pub fn generate(
+    group_threshold: u8,
+    groups: &[Group],
+    master_secret: &[u8],
+    passphrase: &str,
+    iteration_exponent: u8,
+) -> Result<Vec<Vec<Mnemonic>>, Error> {
+    if !is_valid_passphrase(passphrase) {
+        return Err(Error::InvalidPassphrase);
+    }
+    if master_secret.len() < 16 || !master_secret.len().is_multiple_of(2) {
+        return Err(Error::InvalidSecretLength);
+    }
+    let group_count = u8::try_from(groups.len()).map_err(|_| Error::InvalidParameters)?;
+    let settings_valid = iteration_exponent <= 15
+        && (1..=16).contains(&group_count)
+        && (1..=group_count).contains(&group_threshold)
+        && groups.iter().all(|g| {
+            (1..=16).contains(&g.count)
+                && (1..=g.count).contains(&g.threshold)
+                // SLIP-39 step 1: a 1-of-N group with N > 1 would just be
+                // N copies of the same card, so it is not allowed.
+                && !(g.threshold == 1 && g.count > 1)
+        });
+    if !settings_valid {
+        return Err(Error::InvalidParameters);
+    }
+
+    // A random 15-bit identifier; new sets are always extendable.
+    let mut random = [0u8; 2];
+    getrandom::fill(&mut random).map_err(|_| Error::RandomnessUnavailable)?;
+    let identifier = u16::from_be_bytes(random) & 0x7fff;
+    let extendable = true;
+
+    let encrypted = cipher::encrypt(
+        master_secret,
+        passphrase.as_bytes(),
+        iteration_exponent,
+        identifier,
+        extendable,
+    )?;
+
+    // First split into group shares, then each group share into cards.
+    let group_shares = shamir::split_secret(group_threshold, group_count, &encrypted)?;
+    let mut sets = Vec::with_capacity(groups.len());
+    for (group, (group_index, group_share)) in groups.iter().zip(&group_shares) {
+        let members = shamir::split_secret(group.threshold, group.count, group_share)?;
+        let mut cards = Vec::with_capacity(members.len());
+        for (member_index, value) in members {
+            let share = Share {
+                identifier,
+                extendable,
+                iteration_exponent,
+                group_index: *group_index,
+                group_threshold,
+                group_count,
+                member_index,
+                member_threshold: group.threshold,
+                value,
+            };
+            cards.push(Mnemonic(share.to_mnemonic()?));
+        }
+        sets.push(cards);
+    }
+    Ok(sets)
+}
+
+/// SLIP-39 "Passphrase": printable ASCII only (code points 32 to 126).
+fn is_valid_passphrase(passphrase: &str) -> bool {
+    passphrase.bytes().all(|b| (32..=126).contains(&b))
+}
+
 /// Why a set of mnemonics could not be combined.
 ///
-/// More variants will be added (for creating shares), so matching on it
-/// needs a wildcard arm.
+/// Variants may be added, so matching on it needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -77,7 +187,44 @@ pub enum Error {
     /// A group has a different number of mnemonics than its member
     /// threshold requires.
     WrongNumberOfShares,
+    /// Thresholds, counts, indices or the iteration exponent are outside
+    /// what SLIP-39 allows.
+    InvalidParameters,
+    /// The secret is shorter than 16 bytes or not a whole number of 2-byte
+    /// steps.
+    InvalidSecretLength,
+    /// The operating system's random generator failed.
+    RandomnessUnavailable,
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Error::NoShares => "no cards were given",
+            Error::InvalidPassphrase => "the passphrase may only use printable ASCII characters",
+            Error::InvalidWord => "a word is not in the SLIP-39 word list; check the spelling",
+            Error::TooShort => "a card has too few words",
+            Error::InvalidChecksum => {
+                "a card's words do not check out; look for a typo or a word from another card"
+            }
+            Error::InvalidPadding => "a card's words do not form a valid card",
+            Error::GroupThresholdExceedsCount => "a card asks for more groups than exist",
+            Error::InvalidLength => "a card has an impossible number of words",
+            Error::DigestMismatch => "these cards do not belong together, or one was mistyped",
+            Error::DuplicateShareIndex => "two different cards have the same number in one group",
+            Error::SharesDoNotMatch => "these cards come from different sets",
+            Error::WrongNumberOfGroups => "a different number of groups is needed",
+            Error::WrongNumberOfShares => "a group needs a different number of cards",
+            Error::InvalidParameters => "these settings are outside what SLIP-39 allows",
+            Error::RandomnessUnavailable => "the system's random number generator failed",
+            Error::InvalidSecretLength => {
+                "the secret must be 16 bytes or more, in whole 2-byte steps"
+            }
+        })
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Combines SLIP-39 mnemonics into the master secret they were made from,
 /// following "Combining the shares" in SLIP-39.
@@ -91,8 +238,7 @@ pub enum Error {
 /// belong to one set, if there are too few or too many of them, or if the
 /// recovered secret fails its digest check.
 pub fn combine(mnemonics: &[&str], passphrase: &str) -> Result<MasterSecret, Error> {
-    // SLIP-39 "Passphrase": printable ASCII only (code points 32 to 126).
-    if !passphrase.bytes().all(|b| (32..=126).contains(&b)) {
+    if !is_valid_passphrase(passphrase) {
         return Err(Error::InvalidPassphrase);
     }
     let shares = mnemonics
@@ -296,6 +442,175 @@ mod tests {
     #[test]
     fn no_cards_is_refused() {
         assert_eq!(combine(&[], "").map(|_| ()), Err(Error::NoShares));
+    }
+
+    const SECRET_32: &str = "0844a06a5960e57cc19d2cc0c1eb33b4801e9d488838d5eaaf86a1bd3a1fd5e5";
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| hex.get(i..i.wrapping_add(2)))
+            .filter_map(|pair| u8::from_str_radix(pair, 16).ok())
+            .collect()
+    }
+
+    fn recover(cards: &[&Mnemonic], passphrase: &str) -> Result<String, Error> {
+        let words: Vec<&str> = cards.iter().map(|c| c.as_str()).collect();
+        Ok(hex(combine(&words, passphrase)?.as_bytes()))
+    }
+
+    fn group(threshold: u8, count: u8) -> Group {
+        Group { threshold, count }
+    }
+
+    #[test]
+    fn two_of_three_any_two_recover_and_one_never_does() -> Result<(), Error> {
+        let sets = generate(1, &[group(2, 3)], &bytes(SECRET_32), "", 0)?;
+        let [cards] = sets.as_slice() else {
+            return Err(Error::InvalidParameters);
+        };
+        let [a, b, c] = cards.as_slice() else {
+            return Err(Error::InvalidParameters);
+        };
+        for pair in [[a, b], [a, c], [b, c], [c, a]] {
+            assert_eq!(recover(&pair, "")?, SECRET_32);
+        }
+        for single in [a, b, c] {
+            assert_eq!(recover(&[single], ""), Err(Error::WrongNumberOfShares));
+        }
+        Ok(())
+    }
+
+    // The group example from docs/design.md: heirs 2 of 3, Holvard 1 of 1,
+    // backup holder 1 of 1, any 2 of the 3 groups.
+    #[test]
+    fn the_family_example_opens_with_any_two_groups_only() -> Result<(), Error> {
+        let secret = "bb54aac4b89dc868ba37d9cc21b2cece";
+        let sets = generate(
+            2,
+            &[group(2, 3), group(1, 1), group(1, 1)],
+            &bytes(secret),
+            "",
+            0,
+        )?;
+        let [heirs, keeper, backup] = sets.as_slice() else {
+            return Err(Error::InvalidParameters);
+        };
+        let ([h1, h2, h3], [k], [b]) = (heirs.as_slice(), keeper.as_slice(), backup.as_slice())
+        else {
+            return Err(Error::InvalidParameters);
+        };
+        assert_eq!(recover(&[h1, h3, k], "")?, secret); // two heirs + Holvard
+        assert_eq!(recover(&[h2, h3, b], "")?, secret); // two heirs + backup
+        assert_eq!(recover(&[k, b], "")?, secret); // Holvard + backup
+        assert_eq!(recover(&[h1, h2, h3], ""), Err(Error::WrongNumberOfGroups)); // heirs alone
+        assert_eq!(recover(&[h1, k], ""), Err(Error::WrongNumberOfShares)); // one heir + Holvard
+        Ok(())
+    }
+
+    #[test]
+    fn a_passphrase_and_a_128_bit_secret_round_trip() -> Result<(), Error> {
+        let secret = "bb54aac4b89dc868ba37d9cc21b2cece";
+        let sets = generate(1, &[group(2, 2)], &bytes(secret), "TREZOR", 1)?;
+        let cards: Vec<&Mnemonic> = sets.iter().flatten().collect();
+        assert_eq!(recover(&cards, "TREZOR")?, secret);
+        Ok(())
+    }
+
+    // SLIP-39: the identifier and exponent are the first two words, so all
+    // cards of a set share them; cards of one group share the first three.
+    #[test]
+    fn cards_of_a_set_share_their_first_words() -> Result<(), Error> {
+        let sets = generate(2, &[group(2, 3), group(3, 5)], &bytes(SECRET_32), "", 0)?;
+        let first_words = |m: &Mnemonic, n: usize| -> String {
+            m.as_str().split(' ').take(n).collect::<Vec<_>>().join(" ")
+        };
+        let all: Vec<&Mnemonic> = sets.iter().flatten().collect();
+        assert_eq!(all.len(), 8);
+        let set_prefix = all.first().map(|m| first_words(m, 2));
+        assert!(all.iter().all(|m| Some(first_words(m, 2)) == set_prefix));
+        for cards in &sets {
+            let group_prefix = cards.first().map(|m| first_words(m, 3));
+            assert!(
+                cards
+                    .iter()
+                    .all(|m| Some(first_words(m, 3)) == group_prefix)
+            );
+        }
+        Ok(())
+    }
+
+    // SLIP-39 "Generating the shares", step 3: new sets are extendable.
+    #[test]
+    fn new_sets_are_extendable() -> Result<(), Error> {
+        let sets = generate(1, &[group(2, 3)], &bytes(SECRET_32), "", 0)?;
+        for card in sets.iter().flatten() {
+            assert!(Share::from_mnemonic(card.as_str())?.extendable);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn each_new_set_gets_its_own_identifier() -> Result<(), Error> {
+        let first_two = |sets: &[Vec<Mnemonic>]| -> Option<String> {
+            let card = sets.first()?.first()?;
+            Some(
+                card.as_str()
+                    .split(' ')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        };
+        // The identifier is 15 random bits; 5 equal pairs in a row would
+        // happen by chance about once in 10^22 runs.
+        let mut differ = false;
+        for _ in 0..5 {
+            let a = generate(1, &[group(2, 3)], &bytes(SECRET_32), "", 0)?;
+            let b = generate(1, &[group(2, 3)], &bytes(SECRET_32), "", 0)?;
+            differ |= first_two(&a) != first_two(&b);
+        }
+        assert!(differ);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_outside_slip_39_are_refused() {
+        let secret = bytes(SECRET_32);
+        let refuse = |gt: u8, groups: &[Group], ms: &[u8], p: &str, e: u8| {
+            generate(gt, groups, ms, p, e).map(|_| ()).err()
+        };
+        let invalid = Some(Error::InvalidParameters);
+        assert_eq!(refuse(1, &[group(1, 2)], &secret, "", 0), invalid); // 1-of-2 not allowed
+        assert_eq!(refuse(0, &[group(2, 3)], &secret, "", 0), invalid); // no groups needed
+        assert_eq!(refuse(2, &[group(2, 3)], &secret, "", 0), invalid); // more than exist
+        assert_eq!(refuse(1, &[], &secret, "", 0), invalid); // no groups at all
+        assert_eq!(refuse(1, &[group(1, 1); 17], &secret, "", 0), invalid); // 17 groups
+        assert_eq!(refuse(1, &[group(4, 3)], &secret, "", 0), invalid); // threshold > count
+        assert_eq!(refuse(1, &[group(2, 17)], &secret, "", 0), invalid); // 17 cards
+        assert_eq!(refuse(1, &[group(2, 3)], &secret, "", 16), invalid); // exponent > 15
+        let short = secret.get(..15).unwrap_or_default();
+        assert_eq!(
+            refuse(1, &[group(2, 3)], short, "", 0),
+            Some(Error::InvalidSecretLength)
+        );
+        assert_eq!(
+            refuse(1, &[group(2, 3)], &[0u8; 17], "", 0),
+            Some(Error::InvalidSecretLength)
+        );
+        assert_eq!(
+            refuse(1, &[group(2, 3)], &secret, "ključ", 0),
+            Some(Error::InvalidPassphrase)
+        );
+    }
+
+    #[test]
+    fn cards_are_never_printed() -> Result<(), Error> {
+        let sets = generate(1, &[group(2, 3)], &bytes(SECRET_32), "", 0)?;
+        let printed = format!("{sets:?}");
+        assert!(printed.contains("Mnemonic(<redacted>)"));
+        assert!(!printed.contains("academic"));
+        Ok(())
     }
 
     #[test]
