@@ -41,12 +41,38 @@ fn round_function(
     salt.extend_from_slice(salt_prefix);
     salt.extend_from_slice(half);
     let mut out = Zeroizing::new(vec![0u8; half.len()]);
+    // Known limitation: inside the pbkdf2 crate, which has no zeroize
+    // feature, the running PRF block is a plain local that each iteration
+    // overwrites; the last one is left on the stack. The HMAC states it
+    // clones are wiped (hmac and sha2 `zeroize` features) and the result
+    // lands in `out`, which is wiped. Writing PBKDF2 ourselves to close
+    // this would break the rule against home-made cryptography.
     pbkdf2::pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out);
     out
 }
 
+/// Encrypts the master secret, following "Encryption of the master
+/// secret": rounds 0, 1, 2, 3.
+pub(crate) fn encrypt(
+    secret: &[u8],
+    passphrase: &[u8],
+    iteration_exponent: u8,
+    identifier: u16,
+    extendable: bool,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let rounds = [0u8, 1, 2, 3];
+    feistel(
+        secret,
+        passphrase,
+        iteration_exponent,
+        identifier,
+        extendable,
+        rounds,
+    )
+}
+
 /// Turns an encrypted master secret back into the master secret, following
-/// "Decryption of the master secret".
+/// "Decryption of the master secret": the same rounds in reverse order.
 pub(crate) fn decrypt(
     encrypted: &[u8],
     passphrase: &[u8],
@@ -54,10 +80,32 @@ pub(crate) fn decrypt(
     identifier: u16,
     extendable: bool,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    if !encrypted.len().is_multiple_of(2) {
-        return Err(Error::InvalidLength);
+    let rounds = [3u8, 2, 1, 0];
+    feistel(
+        encrypted,
+        passphrase,
+        iteration_exponent,
+        identifier,
+        extendable,
+        rounds,
+    )
+}
+
+/// The four-round Feistel network shared by encryption and decryption:
+/// split the input into halves L and R, apply (L, R) = (R, L xor F(i, R))
+/// for each round i, and output R || L.
+fn feistel(
+    input: &[u8],
+    passphrase: &[u8],
+    iteration_exponent: u8,
+    identifier: u16,
+    extendable: bool,
+    rounds: [u8; 4],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    if !input.len().is_multiple_of(2) {
+        return Err(Error::InvalidSecretLength);
     }
-    let (left, right) = encrypted.split_at(encrypted.len() / 2);
+    let (left, right) = input.split_at(input.len() / 2);
 
     // Non-extendable shares salt each round with "shamir" and the
     // identifier, so they cannot be mixed with another set's shares.
@@ -75,7 +123,7 @@ pub(crate) fn decrypt(
 
     let mut left = Zeroizing::new(left.to_vec());
     let mut right = Zeroizing::new(right.to_vec());
-    for round in [3u8, 2, 1, 0] {
+    for round in rounds {
         let mixed = round_function(round, passphrase, iterations, &salt_prefix, &right);
         // (L, R) = (R, L xor F(i, R))
         let new_right: Zeroizing<Vec<u8>> =
@@ -83,11 +131,11 @@ pub(crate) fn decrypt(
         left = core::mem::replace(&mut right, new_right);
     }
 
-    // MS = R || L
-    let mut secret = Zeroizing::new(Vec::with_capacity(encrypted.len()));
-    secret.extend_from_slice(&right);
-    secret.extend_from_slice(&left);
-    Ok(secret)
+    // Output R || L
+    let mut output = Zeroizing::new(Vec::with_capacity(input.len()));
+    output.extend_from_slice(&right);
+    output.extend_from_slice(&left);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -138,11 +186,39 @@ mod tests {
         Ok(())
     }
 
+    // Expected values from Trezor's reference shamir_mnemonic.cipher.encrypt.
+    #[test]
+    fn encrypts_like_the_reference() -> Result<(), Error> {
+        let ms = bytes(MASTER_SECRET);
+        assert_eq!(
+            *encrypt(&ms, b"TREZOR", 0, 7945, false)?,
+            bytes("11bc609d21747c49ba78c0701293e417")
+        );
+        assert_eq!(
+            *encrypt(&ms, b"TREZOR", 0, 7945, true)?,
+            bytes("4ed5aafca6faf2cbf90519a4d6f41191")
+        );
+        assert_eq!(
+            *encrypt(&ms, b"", 1, 0, true)?,
+            bytes("a140f2960e2782e9b6f5064f7308ddba")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decrypt_undoes_encrypt_for_256_bits() -> Result<(), Error> {
+        let ms = bytes("0844a06a5960e57cc19d2cc0c1eb33b4801e9d488838d5eaaf86a1bd3a1fd5e5");
+        let encrypted = encrypt(&ms, b"", 0, 1234, true)?;
+        assert_ne!(*encrypted, ms);
+        assert_eq!(*decrypt(&encrypted, b"", 0, 1234, true)?, ms);
+        Ok(())
+    }
+
     #[test]
     fn rejects_an_odd_length() {
         assert_eq!(
             decrypt(&[0u8; 17], b"", 0, 0, true),
-            Err(Error::InvalidLength)
+            Err(Error::InvalidSecretLength)
         );
     }
 }

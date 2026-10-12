@@ -22,6 +22,11 @@ HOLVARD=${HOLVARD:-target/release/holvard}
 [ -x "$HOLVARD" ] || { echo "$HOLVARD not built" >&2; exit 1; }
 "$HOLVARD" --version
 
-# The checks below are added together with `holvard init`, `split` and
-# `recover`. Until then this script only verifies the reference tools run.
-echo "Cross-check: reference tools available; no Holvard commands to check yet"
+# SLIP-39, both directions: cards Holvard creates recover with `shamir`,
+# and cards `shamir` creates recover with Holvard. These tests are ignored
+# by plain `cargo test` because they need the `shamir` CLI.
+echo "Cross-check: SLIP-39 against Trezor's shamir"
+cargo test --locked -p holvard-core --test slip39_cross_check -- --ignored
+
+# age: added with the vault code (secret -> cards -> age passphrase).
+echo "Cross-check: age not checked yet (no vault code)"

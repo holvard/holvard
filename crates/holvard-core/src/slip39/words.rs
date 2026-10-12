@@ -3,12 +3,14 @@
 
 //! The SLIP-39 wordlist and the RS1024 checksum over word indices.
 
+use zeroize::Zeroizing;
+
 /// The 1024 words, one per line, in alphabetical order. The file is checked
 /// against its upstream copies by `scripts/check-upstream.sh`.
 const WORDLIST: &str = include_str!("../../../../test-vectors/slip39/wordlist.txt");
 
 /// No SLIP-39 word is longer than this.
-const MAX_WORD_LENGTH: usize = 8;
+pub(crate) const MAX_WORD_LENGTH: usize = 8;
 
 /// `word`'s bytes, zero-padded to `MAX_WORD_LENGTH`, or `None` if longer.
 fn padded(word: &str) -> Option<[u8; MAX_WORD_LENGTH]> {
@@ -50,6 +52,35 @@ pub(crate) fn index_of(word: &str) -> Option<u16> {
     (matches == 1).then_some(found)
 }
 
+/// Number of words in the SLIP-39 wordlist.
+const WORD_COUNT: u16 = 1024;
+
+/// The word at `index` in the SLIP-39 wordlist, or `None` past the end.
+///
+/// Like [`index_of`], it visits all 1024 entries and keeps the wanted one
+/// through a mask, so the time taken does not reveal the index. The result
+/// is wiped when dropped, since it is part of a card.
+pub(crate) fn word_at(index: u16) -> Option<Zeroizing<String>> {
+    if index >= WORD_COUNT {
+        return None;
+    }
+    let mut bytes = Zeroizing::new([0u8; MAX_WORD_LENGTH]);
+    let mut length = 0usize;
+    for (position, entry) in (0u16..).zip(WORDLIST.lines()) {
+        let selected = position == index;
+        let keep = 0u8.wrapping_sub(u8::from(selected)); // 0xff or 0
+        let keep_length = 0usize.wrapping_sub(usize::from(selected)); // all ones or 0
+        // Entries are at most 8 bytes (tested), so padding always succeeds.
+        let candidate = padded(entry).unwrap_or([0; MAX_WORD_LENGTH]);
+        for (out, byte) in bytes.iter_mut().zip(candidate) {
+            *out |= byte & keep;
+        }
+        length |= entry.len() & keep_length;
+    }
+    let word = bytes.get(..length)?;
+    String::from_utf8(word.to_vec()).ok().map(Zeroizing::new)
+}
+
 /// Generator of the RS1024 code, from SLIP-39 section "Checksum".
 const GEN: [u32; 10] = [
     0x00e0_e040,
@@ -83,6 +114,24 @@ fn polymod(customization: &[u8], values: &[u16]) -> u32 {
         }
     }
     chk
+}
+
+/// The three checksum words for `data` (word indices without checksum),
+/// following `rs1024_create_checksum` in the SLIP-39 spec: run the polymod
+/// over the data followed by three zero words, XOR with 1, and split the
+/// 30-bit result into three 10-bit words.
+pub(crate) fn create_checksum(customization: &[u8], data: &[u16]) -> [u16; 3] {
+    // The data words are secret, so the working copy is wiped when dropped,
+    // and allocated once at its final size so it never reallocates.
+    let mut values = Zeroizing::new(Vec::with_capacity(data.len().saturating_add(3)));
+    values.extend_from_slice(data);
+    values.extend_from_slice(&[0, 0, 0]);
+    let residue = polymod(customization, &values) ^ 1;
+    let word = |shift: u32| -> u16 {
+        // Masked to 10 bits, so the conversion cannot fail.
+        u16::try_from(residue.wrapping_shr(shift) & 0x3ff).unwrap_or(0)
+    };
+    [word(20), word(10), word(0)]
 }
 
 /// Whether `values` (word indices, checksum included) carry a valid RS1024
@@ -126,6 +175,16 @@ mod tests {
     }
 
     #[test]
+    fn indices_map_back_to_their_words() {
+        let word = |i| word_at(i).map(|w| w.as_str().to_owned());
+        assert_eq!(word(0).as_deref(), Some("academic"));
+        assert_eq!(word(1).as_deref(), Some("acid"));
+        assert_eq!(word(1002).as_deref(), Some("western"));
+        assert_eq!(word(1023).as_deref(), Some("zero"));
+        assert_eq!(word(1024), None);
+    }
+
+    #[test]
     fn near_misses_are_not_words() {
         assert_eq!(index_of("academi"), None); // a prefix
         assert_eq!(index_of("academics"), None); // a word plus a letter
@@ -139,6 +198,18 @@ mod tests {
     fn valid_checksums_verify_with_their_customization_string() {
         assert!(checksum_is_valid(b"shamir", &indices(VECTOR_4)));
         assert!(checksum_is_valid(b"shamir_extendable", &indices(VECTOR_43)));
+    }
+
+    #[test]
+    fn created_checksum_equals_the_cards_last_three_words() {
+        for (customization, card) in [
+            (b"shamir".as_slice(), VECTOR_4),
+            (b"shamir_extendable".as_slice(), VECTOR_43),
+        ] {
+            let words = indices(card);
+            let (data, checksum) = words.split_at(words.len().saturating_sub(3));
+            assert_eq!(create_checksum(customization, data).as_slice(), checksum);
+        }
     }
 
     #[test]
