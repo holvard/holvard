@@ -13,6 +13,7 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 pub mod slip39;
+pub mod vault;
 
 /// Version of the Holvard card and vault format this crate implements.
 ///

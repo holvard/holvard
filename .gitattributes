@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Test vectors are compared byte for byte (and the vendored SLIP-39 files
+# against upstream hashes), so Git must never convert their line endings.
+test-vectors/** -text

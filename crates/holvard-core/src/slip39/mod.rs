@@ -17,7 +17,7 @@ use share::Share;
 mod cipher;
 mod gf256;
 mod shamir;
-mod share;
+pub(crate) mod share;
 mod words;
 
 /// A recovered master secret. Never printed, and wiped from memory when

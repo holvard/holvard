@@ -14,6 +14,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+age = { version = "0.12.1", default-features = false }
 getrandom = "0.4"
 hmac = { version = "0.13", features = ["zeroize"] }
 pbkdf2 = "0.13"

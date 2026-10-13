@@ -34,3 +34,12 @@ panic = "deny"
 codegen-units = 1
 lto = true
 strip = "symbols"
+
+# scrypt at age's work factor 18 takes minutes without optimisation, which
+# makes the vault tests too slow in debug builds. Only these crates are
+# optimised; Holvard's own code still builds as plain debug.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3

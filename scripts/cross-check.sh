@@ -7,13 +7,15 @@
 #   - every card set must recover with Trezor's reference SLIP-39
 #     implementation (`shamir` from python-shamir-mnemonic), and back
 #
-# Requires: age, shamir (pip install --require-hashes -r
-# scripts/cross-check/requirements.txt), a built `holvard`.
+# Requires: age and age-plugin-batchpass (age 1.3 or later), shamir
+# (pip install --require-hashes -r scripts/cross-check/requirements.txt),
+# a built `holvard`.
 
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 
 command -v age >/dev/null || { echo "age not found" >&2; exit 1; }
+command -v age-plugin-batchpass >/dev/null || { echo "age-plugin-batchpass not found" >&2; exit 1; }
 command -v shamir >/dev/null || { echo "shamir not found" >&2; exit 1; }
 age --version
 shamir --help >/dev/null
@@ -28,5 +30,8 @@ HOLVARD=${HOLVARD:-target/release/holvard}
 echo "Cross-check: SLIP-39 against Trezor's shamir"
 cargo test --locked -p holvard-core --test slip39_cross_check -- --ignored
 
-# age: added with the vault code (secret -> cards -> age passphrase).
-echo "Cross-check: age not checked yet (no vault code)"
+# Whole vaults, both directions: a vault Holvard creates opens with
+# `shamir recover` and `age -d` alone, and a vault made with `shamir create`
+# and `age -e` opens with Holvard.
+echo "Cross-check: vaults against shamir and age"
+cargo test --locked -p holvard-core --test vault_cross_check -- --ignored
