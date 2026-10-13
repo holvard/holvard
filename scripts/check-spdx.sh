@@ -32,9 +32,13 @@ trap 'rm -f "$tmp"' EXIT
 # (for example, a sample header in documentation). The markers are written
 # as REUSE-Ignore(Start) and REUSE-Ignore(End) so this script stays readable
 # to reuse itself.
+# awk runs in the C locale, reading bytes: binary test vectors such as
+# vault.age are not valid UTF-8, and the patterns are plain ASCII. This
+# matches CI, whose awk (mawk) always reads bytes. Trade-off: a header
+# indented with non-ASCII whitespace is not seen.
 # shellcheck disable=SC2016 # $0 and friends are awk's, not the shell's.
 git ls-files -z -- ':!:REUSE.toml' ':!:LICENSES/' ':!:LICENSE-*' \
-    | xargs -0 awk '
+    | LC_ALL=C xargs -0 awk '
         FNR == 1 { skip = 0 }
         /REUSE-Ignore(Start)/ { skip = 1 }
         /REUSE-Ignore(End)/ { skip = 0; next }
