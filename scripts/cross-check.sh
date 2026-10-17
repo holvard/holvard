@@ -35,3 +35,11 @@ cargo test --locked -p holvard-core --test slip39_cross_check -- --ignored
 # and `age -e` opens with Holvard.
 echo "Cross-check: vaults against shamir and age"
 cargo test --locked -p holvard-core --test vault_cross_check -- --ignored
+
+# The CLI, both directions: a folder packed by `holvard create` comes back
+# with `shamir recover`, `age -d` and `unzip`; a folder zipped with `zip`
+# and encrypted with `age` comes back with `holvard recover`.
+echo "Cross-check: holvard create/recover against shamir, age and zip"
+command -v zip >/dev/null || { echo "zip not found" >&2; exit 1; }
+command -v unzip >/dev/null || { echo "unzip not found" >&2; exit 1; }
+cargo test --locked -p holvard --test cli_cross_check -- --ignored

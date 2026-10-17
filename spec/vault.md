@@ -82,8 +82,21 @@ expensive work:
 
 ## Contents
 
-The age payload is opaque bytes. This draft defines no structure inside
-it; packing several documents, a vault version or a date is left to a later
+The age payload is opaque bytes; any payload is a valid vault.
+
+Holvard writes a zip archive (deflate) holding one top folder, the folder
+the owner chose, with only regular files and folders, all dates set to
+1980-01-01, at most 10 000 entries (folders included) and at most 4 GiB of
+file data.
+
+A reader unpacking the zip must refuse: names that are not UTF-8, start
+with `/`, contain `\`, NUL or control characters, or have an empty, `.` or
+`..` part; entries whose Unix mode says anything other than a regular file
+or a folder; more than 10 000 entries; more than 4 GiB once decompressed,
+counted as it decompresses. It must never overwrite a file or follow a
+link. A payload that is not a zip is kept as one file, as it is.
+
+A vault version, a date or a manifest inside the zip are left to a later
 version of this spec and will be added without changing the layers above.
 
 ## Memory hygiene
@@ -97,20 +110,27 @@ at the top of `crates/holvard-core/src/vault.rs`).
 
 ```sh
 shamir recover            # type two cards; prints the secret as hex
-age -d vault.age > contents
+age -d vault.age > contents.zip
                           # at the prompt, type the hex secret
+unzip contents.zip        # or double-click contents.zip
 ```
+
+A vault whose contents are not a zip (one made outside Holvard, for
+example) is already the contents after `age -d`; `unzip` then says it is
+not a zip file.
 
 Non-interactively, with `age-plugin-batchpass` (age 1.3 or later). Keep
 the secret out of the command line, so it does not land in the shell's
 history: save it to a file first, and remove the file afterwards.
 
 ```sh
-AGE_PASSPHRASE_FD=3 age -d -j batchpass vault.age > contents 3<secret.hex
+AGE_PASSPHRASE_FD=3 age -d -j batchpass vault.age > contents.zip 3<secret.hex
 ```
 
 ## Test vector
 
 [test-vectors/vault/](../test-vectors/vault/) holds a vault made only with
 the official tools. Every implementation must open it with any two of its
-cards.
+cards. [test-vectors/vault-zip/](../test-vectors/vault-zip/) holds one whose
+contents are a zip of a folder, as Holvard writes them, also made only with
+standard tools.

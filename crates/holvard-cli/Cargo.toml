@@ -19,6 +19,9 @@ path = "src/main.rs"
 
 [dependencies]
 holvard-core.workspace = true
+zeroize.workspace = true
+zip.workspace = true
+signal-hook.workspace = true
 
 [lints]
 workspace = true

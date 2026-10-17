@@ -16,6 +16,13 @@ authors = ["Holvard contributors"]
 
 [workspace.dependencies]
 holvard-core = { path = "crates/holvard-core", version = "0.0.0" }
+zeroize = "1.9"
+# Deflate only (pure Rust, via flate2 and zlib-rs): no zip encryption, no
+# other compression methods, no time handling. Approved 2026-10-15.
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Ctrl-C handling, so the terminal is restored when cards are on screen.
+# Only the signal iterator. Approved 2026-10-16.
+signal-hook = { version = "0.4.5", default-features = false, features = ["iterator"] }
 
 # Everything is deny, not warn: CI builds with -D warnings, so a warning
 # here would pass locally and fail in CI.

@@ -28,6 +28,9 @@ Design: docs/design.md.
   official `age` CLI; shares recover with Trezor's `shamir-mnemonic` CLI.
 - No `unsafe`, no network access in holvard-core, no panics on bad input.
 - Never log, print or persist secrets; wipe them from memory (`zeroize`).
+  Exception: `holvard create` shows the cards once, on the terminal's
+  alternate screen only, or writes them to a file only when the owner
+  names one (`--cards-file`).
 - Never describe the design as "nobody can open it early": any two holders
   can. The guarantee is that Holvard alone cannot.
 - Owner-side encryption runs in the CLI. Any browser app is served only as
