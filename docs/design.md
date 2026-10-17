@@ -164,7 +164,7 @@ already made can never be taken back.
 | Format spec (`spec/`) | Card format, vault file format, step-by-step recovery | CC-BY-4.0 |
 | Test vectors (`test-vectors/`) | Sample cards and vaults with expected results | CC0-1.0 |
 | `holvard-core` | Secret generation, encryption with age, SLIP-39 split and combine, card encoding | Apache-2.0 OR MIT |
-| `holvard` CLI | `init`, `split`, `cards`, `recover`, `seal` | Apache-2.0 OR MIT |
+| `holvard` CLI | `create`, `split`, `cards`, `recover`, `seal` | Apache-2.0 OR MIT |
 | Recovery page | One offline HTML file with camera QR scanning, checked against the test vectors; a copy in every kit and signed downloads, no hosted copy at launch | Apache-2.0 OR MIT |
 | `holvard-server` (later) | The keeper: shares, vault copies, check-ins, waiting period, veto, claims | AGPL-3.0-only |
 | Mobile apps (later) | Native apps on the same core | Apache-2.0 OR MIT |

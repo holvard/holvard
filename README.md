@@ -16,7 +16,7 @@ beneficiary and an independent backup holder such as a notary.
 | `spec/` | Card format, vault file format, step-by-step recovery | CC BY 4.0 |
 | `test-vectors/` | Sample cards and vaults with expected results | CC0 1.0 |
 | `crates/holvard-core` | Key generation, age encryption, SLIP-39 split and combine, card encoding | Apache-2.0 OR MIT |
-| `crates/holvard-cli` | The `holvard` command: `init`, `split`, `cards`, `recover`, `seal` | Apache-2.0 OR MIT |
+| `crates/holvard-cli` | The `holvard` command: `create`, `split`, `cards`, `recover`, `seal` | Apache-2.0 OR MIT |
 | `scripts/` | SPDX, DCO and cross-check scripts used by CI | Apache-2.0 OR MIT |
 | `docs/` | Design, release signing and reproducible builds | CC BY 4.0 |
 
@@ -28,6 +28,16 @@ cargo test --locked
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`.
+
+## Trying it
+
+```sh
+holvard create my-folder     # writes vault.age and shows its three cards
+holvard recover vault.age    # asks for two cards, writes vault-recovered/
+```
+
+Any two of the three cards open the vault; one card alone reveals nothing.
+Nothing here is ready to protect real data yet.
 
 ## How we check the code
 

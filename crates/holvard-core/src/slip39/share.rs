@@ -144,8 +144,8 @@ impl Share {
         // Count the words first so the buffer never has to grow.
         let mut indices: Zeroizing<Vec<u16>> =
             Zeroizing::new(Vec::with_capacity(mnemonic.split_whitespace().count()));
-        for word in mnemonic.split_whitespace() {
-            indices.push(index_of(word).ok_or(Error::InvalidWord)?);
+        for (position, word) in (1usize..).zip(mnemonic.split_whitespace()) {
+            indices.push(index_of(word).ok_or(Error::InvalidWord { position })?);
         }
         if indices.len() < MIN_WORDS {
             return Err(Error::TooShort);
@@ -384,12 +384,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_unknown_word() {
+    fn rejects_an_unknown_word_and_says_which() {
         assert_eq!(
             Share::from_mnemonic(
                 "shadow pistol academic always adequate wildlife fancy gross oasis cylinder mustang wrist rescue view short owner flip making coding bitcoin"
             ).err(),
-            Some(Error::InvalidWord)
+            Some(Error::InvalidWord { position: 20 })
+        );
+        // The first unknown word is reported, counting from 1.
+        assert_eq!(
+            Share::from_mnemonic("nonsense academic").err(),
+            Some(Error::InvalidWord { position: 1 })
         );
     }
 

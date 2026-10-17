@@ -41,12 +41,13 @@ fn round_function(
     salt.extend_from_slice(salt_prefix);
     salt.extend_from_slice(half);
     let mut out = Zeroizing::new(vec![0u8; half.len()]);
-    // Known limitation: inside the pbkdf2 crate, which has no zeroize
-    // feature, the running PRF block is a plain local that each iteration
-    // overwrites; the last one is left on the stack. The HMAC states it
-    // clones are wiped (hmac and sha2 `zeroize` features) and the result
-    // lands in `out`, which is wiped. Writing PBKDF2 ourselves to close
-    // this would break the rule against home-made cryptography.
+    // Known limitation: inside the pbkdf2 crate the running PRF block is a
+    // plain local that each iteration overwrites, and hmac's finalisation
+    // keeps its inner hash in a plain local too (hmac 0.13.0,
+    // src/block_api.rs:82). RustCrypto leaves such stack values for the
+    // caller to wipe (RustCrypto/meta#38); vault.rs does so as a best
+    // effort. The HMAC states pbkdf2 clones are wiped (hmac and sha2
+    // `zeroize` features) and the result lands in `out`, which is wiped.
     pbkdf2::pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out);
     out
 }

@@ -12,13 +12,15 @@
 //! Known limitation: some copies made inside age and scrypt are freed
 //! without being wiped. When encrypting, age's stream writer keeps the last
 //! chunk of the contents (up to 64 KiB) in a buffer it clears but does not
-//! wipe. On both sides, the key that scrypt derives from the passphrase is
-//! left on the stack, and scrypt's working memory (about 256 MiB at work
-//! factor 18) is freed unwiped. What Holvard holds itself (the secret, the
-//! passphrase, the opened contents) is wiped. Closing these gaps ourselves
-//! would break the rule against home-made cryptography. scrypt's buffers
-//! are RustCrypto/password-hashes#938; the age buffers are to be reported
-//! to str4d/rage.
+//! wipe (str4d/rage#647). scrypt's working memory (about 256 MiB at work
+//! factor 18) is freed unwiped (RustCrypto/password-hashes#938). Values on
+//! the stack inside scrypt, PBKDF2 and HMAC, among them a copy of the key
+//! scrypt derives from the passphrase, are left for the caller to wipe:
+//! that is the policy of those libraries (RustCrypto/meta#38). Holvard
+//! wipes the stack after its work as a best effort (`wipe_stack`), and
+//! wipes what it holds itself (the secret, the passphrase, the opened
+//! contents). Closing the remaining gaps ourselves would break the rule
+//! against home-made cryptography.
 
 use core::fmt::{self, Write as _};
 use std::io::Read as _;
@@ -49,6 +51,10 @@ const MAX_WORK_FACTOR: u8 = 20;
 /// quadratically with length, so longer files are refused unparsed.
 const MAX_HEADER_LEN: usize = 1024;
 
+/// Stack space wiped after the work on the secret: 64 KiB, well above what
+/// age, scrypt, PBKDF2 and HMAC use in their own stack frames.
+const STACK_WIPE: usize = 64 * 1024;
+
 /// A new vault: the encrypted file and the three cards that open it.
 #[derive(Debug)]
 pub struct Vault {
@@ -67,6 +73,15 @@ pub struct Vault {
 /// Returns an error if the random generator fails, if splitting the
 /// secret into cards fails, or if encryption fails.
 pub fn create_vault(contents: &[u8]) -> Result<Vault, Error> {
+    let vault = create_vault_inner(contents);
+    wipe_stack();
+    vault
+}
+
+/// The work of [`create_vault`], in its own stack frame so `wipe_stack`
+/// can clear it afterwards.
+#[inline(never)]
+fn create_vault_inner(contents: &[u8]) -> Result<Vault, Error> {
     let mut secret = Zeroizing::new([0u8; SECRET_LEN]);
     getrandom::fill(secret.as_mut()).map_err(|_| Error::RandomnessUnavailable)?;
 
@@ -101,6 +116,15 @@ pub fn create_vault(contents: &[u8]) -> Result<Vault, Error> {
 /// not two different Holvard cards of one set, if they belong to a
 /// different vault, or if the vault file is damaged.
 pub fn open_vault(cards: &[&str], encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let contents = open_vault_inner(cards, encrypted);
+    wipe_stack();
+    contents
+}
+
+/// The work of [`open_vault`], in its own stack frame so `wipe_stack` can
+/// clear it afterwards.
+#[inline(never)]
+fn open_vault_inner(cards: &[&str], encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     // Cheap checks first, so a crafted file or crafted cards cannot make
     // age or SLIP-39 do a lot of work.
     if !header_is_small(encrypted) {
@@ -137,6 +161,51 @@ pub fn open_vault(cards: &[&str], encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>
     Ok(contents)
 }
 
+/// Turns a card as a person typed it into its exact words: lowercase,
+/// single spaces, and each word given by at least its first four letters
+/// completed (SLIP-39 words are unique in their first four letters).
+///
+/// Only typed input needs this; [`open_vault`] takes full words.
+///
+/// # Errors
+///
+/// Returns `Error::Cards(slip39::Error::InvalidWord { position })` for the
+/// first word that is not a SLIP-39 word or the start of one.
+pub fn complete_card(typed: &str) -> Result<Zeroizing<String>, Error> {
+    let word_count = typed.split_whitespace().count();
+    // At most 8 letters and a space per word, so the string never grows.
+    let mut card = Zeroizing::new(String::with_capacity(
+        word_count.saturating_mul(slip39::MAX_WORD_LENGTH.saturating_add(1)),
+    ));
+    let mut lower = Zeroizing::new([0u8; slip39::MAX_WORD_LENGTH]);
+    for (position, word) in (1usize..).zip(typed.split_whitespace()) {
+        let invalid = || Error::Cards(slip39::Error::InvalidWord { position });
+        let bytes = word.as_bytes();
+        let slot = lower.get_mut(..bytes.len()).ok_or_else(invalid)?;
+        for (out, byte) in slot.iter_mut().zip(bytes) {
+            *out = byte.to_ascii_lowercase();
+        }
+        let lowered = core::str::from_utf8(slot).map_err(|_| invalid())?;
+        let index = slip39::complete_word(lowered).ok_or_else(invalid)?;
+        let full = slip39::word_at(index).ok_or_else(invalid)?;
+        if position > 1 {
+            card.push(' ');
+        }
+        card.push_str(&full);
+    }
+    Ok(card)
+}
+
+/// Overwrites the stack below the caller with zeros, removing temporaries
+/// left there by age, scrypt, PBKDF2 and HMAC. Best effort, as zeroize's
+/// own documentation says: it works because the work runs in a separate
+/// `#[inline(never)]` function, and the compiler may still keep copies
+/// elsewhere (registers, other frames). It does not make the stack
+/// provably clean.
+fn wipe_stack() {
+    zeroize::zeroize_stack::<STACK_WIPE>();
+}
+
 /// Whether the age header, up to the newline ending its MAC line, fits in
 /// `MAX_HEADER_LEN` bytes. age marks the header's end with a line starting
 /// `---`; stanza lines cannot start that way. That line's own newline must
@@ -151,10 +220,47 @@ fn header_is_small(encrypted: &[u8]) -> bool {
         .is_some_and(|mac_line| mac_line.contains(&b'\n'))
 }
 
-/// spec/vault.md, reader rules: exactly two different cards, each from one
-/// group of 2-of-n, iteration exponent 0 and a 256-bit secret. Checked
-/// before combining, because combining runs PBKDF2 with the cost the cards
-/// themselves ask for.
+/// spec/vault.md, reader rules: one group (its threshold can then only be
+/// 1), two of its cards, iteration exponent 0 and a 256-bit secret.
+fn is_holvard(share: &Share) -> bool {
+    share.iteration_exponent == ITERATION_EXPONENT
+        && share.group_count == 1
+        && share.member_threshold == 2
+        && share.value.len() == SECRET_LEN
+}
+
+/// Checks one card on its own: its words, its checksum and Holvard's
+/// settings. Lets a program say which card has a problem before both are
+/// entered; [`open_vault`] runs the same checks.
+///
+/// # Errors
+///
+/// `Error::Cards` for a word, length or checksum problem;
+/// `Error::NotHolvardCards` for a valid card made with other settings.
+pub fn check_card(card: &str) -> Result<(), Error> {
+    let share = Share::from_mnemonic(card).map_err(Error::Cards)?;
+    if is_holvard(&share) {
+        Ok(())
+    } else {
+        Err(Error::NotHolvardCards)
+    }
+}
+
+/// Whether two cards are the same card (same set and same member).
+///
+/// # Errors
+///
+/// `Error::Cards` if either card does not parse.
+pub fn same_card(a: &str, b: &str) -> Result<bool, Error> {
+    let a = Share::from_mnemonic(a).map_err(Error::Cards)?;
+    let b = Share::from_mnemonic(b).map_err(Error::Cards)?;
+    Ok(a.is_same_card(&b))
+}
+
+/// spec/vault.md, reader rules: exactly two different cards with Holvard's
+/// settings. Checked before combining, because combining runs PBKDF2 with
+/// the cost the cards themselves ask for. Parse errors come first, then
+/// "same card twice", then settings.
 fn check_cards(cards: &[&str]) -> Result<(), Error> {
     let [first, second] = cards else {
         return Err(Error::Cards(slip39::Error::WrongNumberOfShares));
@@ -164,14 +270,7 @@ fn check_cards(cards: &[&str]) -> Result<(), Error> {
     if first.is_same_card(&second) {
         return Err(Error::SameCardTwice);
     }
-    let holvard = |s: &Share| {
-        // One group (its threshold can then only be 1), two of its cards.
-        s.iteration_exponent == ITERATION_EXPONENT
-            && s.group_count == 1
-            && s.member_threshold == 2
-            && s.value.len() == SECRET_LEN
-    };
-    if holvard(&first) && holvard(&second) {
+    if is_holvard(&first) && is_holvard(&second) {
         Ok(())
     } else {
         Err(Error::NotHolvardCards)
@@ -251,6 +350,89 @@ mod tests {
     fn words(vault: &Vault) -> [&str; 3] {
         let [a, b, c] = &vault.cards;
         [a.as_str(), b.as_str(), c.as_str()]
+    }
+
+    #[test]
+    fn check_card_accepts_holvard_cards_and_names_problems() -> TestResult {
+        let vault = create_vault(b"x")?;
+        for card in words(&vault) {
+            check_card(card)?;
+        }
+        let [first, ..] = words(&vault);
+        // Change one word to a different valid word; swapping two random
+        // words could swap two equal ones and leave the card valid.
+        let mut changed: Vec<&str> = first.split(' ').collect();
+        let word = changed.get_mut(5).ok_or("short card")?;
+        *word = if *word == "academic" {
+            "acid"
+        } else {
+            "academic"
+        };
+        assert_eq!(
+            check_card(&changed.join(" ")),
+            Err(Error::Cards(slip39::Error::InvalidChecksum))
+        );
+        // A valid SLIP-39 card with other settings (3-of-3).
+        let group = Group {
+            threshold: 3,
+            count: 3,
+        };
+        let sets = resplit(&vault, &[group], SECRET_LEN, ITERATION_EXPONENT)?;
+        let other = sets.first().and_then(|set| set.first()).ok_or("no card")?;
+        assert_eq!(check_card(other.as_str()), Err(Error::NotHolvardCards));
+        Ok(())
+    }
+
+    #[test]
+    fn check_card_agrees_with_open_vault() -> TestResult {
+        let vault = create_vault(b"x")?;
+        let [a, b, _] = words(&vault);
+        let broken = a.replacen(' ', " zzzz ", 1);
+        assert_eq!(
+            check_card(&broken).err(),
+            open_vault(&[&broken, b], &vault.encrypted).err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn same_card_tells_cards_apart() -> TestResult {
+        let vault = create_vault(b"x")?;
+        let [a, b, _] = words(&vault);
+        assert!(same_card(a, a)?);
+        assert!(!same_card(a, b)?);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_card_turns_prefixes_into_words() -> TestResult {
+        let vault = create_vault(b"x")?;
+        let [full, ..] = words(&vault);
+        let short: Vec<&str> = full.split(' ').map(|w| w.get(..4).unwrap_or(w)).collect();
+        assert_eq!(complete_card(&short.join(" "))?.as_str(), full);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_card_accepts_capitals_and_extra_spaces() -> TestResult {
+        let vault = create_vault(b"x")?;
+        let [full, ..] = words(&vault);
+        let messy = format!("  {}  ", full.to_uppercase().replace(' ', "   "));
+        assert_eq!(complete_card(&messy)?.as_str(), full);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_card_names_the_bad_word() {
+        assert_eq!(
+            complete_card("academic acid zzzz").err(),
+            Some(Error::Cards(slip39::Error::InvalidWord { position: 3 }))
+        );
+        // Longer than any word: refused, not cut.
+        assert_eq!(
+            complete_card("academicacademic").err(),
+            Some(Error::Cards(slip39::Error::InvalidWord { position: 1 }))
+        );
     }
 
     #[test]
