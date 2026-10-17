@@ -20,6 +20,8 @@ mod shamir;
 pub(crate) mod share;
 mod words;
 
+pub(crate) use words::{MAX_WORD_LENGTH, complete as complete_word, word_at};
+
 /// A recovered master secret. Never printed, and wiped from memory when
 /// dropped.
 pub struct MasterSecret(Zeroizing<Vec<u8>>);
@@ -159,8 +161,12 @@ pub enum Error {
     NoShares,
     /// The passphrase contains characters other than printable ASCII.
     InvalidPassphrase,
-    /// A word is not in the SLIP-39 wordlist.
-    InvalidWord,
+    /// A word is not in the SLIP-39 wordlist. The word itself is not kept,
+    /// since it is secret; only its position is.
+    InvalidWord {
+        /// Position of the first unknown word on the card, from 1.
+        position: usize,
+    },
     /// A mnemonic has too few words to hold a 128-bit secret.
     TooShort,
     /// A mnemonic's last three words do not match the rest (a typo, or a
@@ -199,28 +205,43 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Error::NoShares => "no cards were given",
-            Error::InvalidPassphrase => "the passphrase may only use printable ASCII characters",
-            Error::InvalidWord => "a word is not in the SLIP-39 word list; check the spelling",
-            Error::TooShort => "a card has too few words",
-            Error::InvalidChecksum => {
-                "a card's words do not check out; look for a typo or a word from another card"
+        match self {
+            Error::InvalidWord { position } => write!(
+                f,
+                "word {position} is not in the SLIP-39 word list; check the spelling"
+            ),
+            Error::NoShares => f.write_str("no cards were given"),
+            Error::InvalidPassphrase => {
+                f.write_str("the passphrase may only use printable ASCII characters")
             }
-            Error::InvalidPadding => "a card's words do not form a valid card",
-            Error::GroupThresholdExceedsCount => "a card asks for more groups than exist",
-            Error::InvalidLength => "a card has an impossible number of words",
-            Error::DigestMismatch => "these cards do not belong together, or one was mistyped",
-            Error::DuplicateShareIndex => "two different cards have the same number in one group",
-            Error::SharesDoNotMatch => "these cards come from different sets",
-            Error::WrongNumberOfGroups => "a different number of groups is needed",
-            Error::WrongNumberOfShares => "a group needs a different number of cards",
-            Error::InvalidParameters => "these settings are outside what SLIP-39 allows",
-            Error::RandomnessUnavailable => "the system's random number generator failed",
+            Error::TooShort => f.write_str("a card has too few words"),
+            Error::InvalidChecksum => f.write_str(
+                "a card's words do not check out; look for a typo or a word from another card",
+            ),
+            Error::InvalidPadding => f.write_str("a card's words do not form a valid card"),
+            Error::GroupThresholdExceedsCount => {
+                f.write_str("a card asks for more groups than exist")
+            }
+            Error::InvalidLength => f.write_str("a card has an impossible number of words"),
+            Error::DigestMismatch => {
+                f.write_str("these cards do not belong together, or one was mistyped")
+            }
+            Error::DuplicateShareIndex => {
+                f.write_str("two different cards have the same number in one group")
+            }
+            Error::SharesDoNotMatch => f.write_str("these cards come from different sets"),
+            Error::WrongNumberOfGroups => f.write_str("a different number of groups is needed"),
+            Error::WrongNumberOfShares => f.write_str("a group needs a different number of cards"),
+            Error::InvalidParameters => {
+                f.write_str("these settings are outside what SLIP-39 allows")
+            }
             Error::InvalidSecretLength => {
-                "the secret must be 16 bytes or more, in whole 2-byte steps"
+                f.write_str("the secret must be 16 bytes or more, in whole 2-byte steps")
             }
-        })
+            Error::RandomnessUnavailable => {
+                f.write_str("the system's random number generator failed")
+            }
+        }
     }
 }
 

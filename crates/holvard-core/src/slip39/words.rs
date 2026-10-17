@@ -52,6 +52,41 @@ pub(crate) fn index_of(word: &str) -> Option<u16> {
     (matches == 1).then_some(found)
 }
 
+/// SLIP-39 words are unique in their first four letters.
+const PREFIX_LENGTH: usize = 4;
+
+/// Index of the word that `typed` is a prefix of, if `typed` has at least
+/// four letters. SLIP-39 guarantees that the first four letters identify a
+/// word, so `acad`, `acade` and `academic` all give `academic`.
+///
+/// Like [`index_of`], it compares `typed` with all 1024 entries without
+/// stopping at a match and without branching on the bytes. Only the
+/// length checks return early or branch, and the length of what was typed
+/// is not secret.
+pub(crate) fn complete(typed: &str) -> Option<u16> {
+    if typed.len() < PREFIX_LENGTH {
+        return None;
+    }
+    let wanted = padded(typed)?;
+    let mut found = 0u16;
+    let mut matches = 0u16;
+    for (index, entry) in (0u16..).zip(WORDLIST.lines()) {
+        // See `index_of`: never taken for the vendored list.
+        let candidate = padded(entry).unwrap_or([0xff; MAX_WORD_LENGTH]);
+        // A prefix of the entry: no longer than it, and equal on its own
+        // length. Bytes past the typed length are not compared.
+        let mut difference = u8::from(typed.len() > entry.len());
+        for (position, (a, b)) in candidate.iter().zip(wanted.iter()).enumerate() {
+            let inside = 0u8.wrapping_sub(u8::from(position < typed.len())); // 0xff or 0
+            difference |= (a ^ b) & inside;
+        }
+        let is_match = u16::from(difference == 0);
+        found |= index & 0u16.wrapping_sub(is_match); // keep index if matched
+        matches |= is_match;
+    }
+    (matches == 1).then_some(found)
+}
+
 /// Number of words in the SLIP-39 wordlist.
 const WORD_COUNT: u16 = 1024;
 
@@ -192,6 +227,26 @@ mod tests {
         assert_eq!(index_of("acid\0\0\0\0"), None);
         assert_eq!(index_of("zerozerozero"), None); // longer than any word
         assert_eq!(index_of("acid"), Some(1));
+    }
+
+    #[test]
+    fn every_word_is_found_from_its_first_four_letters() {
+        for (index, word) in (0u16..).zip(WORDLIST.lines()) {
+            for length in 4..=word.len() {
+                let prefix = word.get(..length).unwrap_or(word);
+                assert_eq!(complete(prefix), Some(index), "{prefix}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_or_wrong_prefixes_are_not_completed() {
+        assert_eq!(complete("aca"), None); // 3 letters: too short
+        assert_eq!(complete("acadx"), None); // right start, wrong continuation
+        assert_eq!(complete("academicx"), None); // longer than the word
+        assert_eq!(complete("acid\0"), None); // padding must not hide a NUL
+        assert_eq!(complete("zzzz"), None);
+        assert_eq!(complete(""), None);
     }
 
     #[test]
