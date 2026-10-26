@@ -82,7 +82,7 @@ jobs:
       - run: rustup toolchain install && cargo --version
       # A prebuilt binary, not cargo-deny-action: that action builds a Docker
       # image from Docker Hub, which hits its anonymous pull rate limit.
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
@@ -96,7 +96,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install && cargo --version
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-audit@0.22.2
       - run: cargo audit --deny warnings
