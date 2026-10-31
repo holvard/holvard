@@ -723,7 +723,9 @@ mod tests {
             read_file(&path, 5, dev, ino),
             Err(PackError::Changed(_))
         ));
-        fs::remove_file(&path)?;
+        // Moved aside, not removed: Linux gives a freed inode number to the
+        // next new file, and `other` would then have the same identity.
+        fs::rename(&path, t.0.join("moved"))?;
         let other = t.0.join("other");
         fs::write(&other, b"12345")?;
         std::os::unix::fs::symlink(&other, &path)?; // swapped for a link
