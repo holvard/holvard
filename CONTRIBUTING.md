@@ -13,7 +13,7 @@ Signed-off-by: Your Name <you@example.com>
 
 `git commit -s` adds it for you. The name and email must match the commit
 author. CI rejects pull requests and pushes to `main` with unsigned commits
-(`scripts/check-dco.sh`). Bot commits, such as Dependabot updates, are exempt.
+(`scripts/check-dco.sh`). Only Dependabot's commits are exempt.
 
 ## AI-assisted contributions
 
