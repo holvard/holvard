@@ -123,8 +123,9 @@ fn main() -> ExitCode {
             Ok(())
         }
         args::Command::Version => {
+            // "draft" until spec/vault.md is frozen as version 1.
             println!(
-                "holvard {} (format v{})",
+                "holvard {} (format v{}, draft, not frozen)",
                 env!("CARGO_PKG_VERSION"),
                 holvard_core::FORMAT_VERSION
             );

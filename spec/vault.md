@@ -107,9 +107,10 @@ version of this spec and will be added without changing the layers above.
 ## Memory hygiene
 
 Implementations should wipe the secret, the passphrase and the opened
-contents from memory when done. Holvard's own code does; some buffers inside
-the age and scrypt libraries it uses are freed without wiping (see the note
-at the top of `crates/holvard-core/src/vault.rs`).
+contents from memory when done. Holvard's own code does; some buffers
+inside the libraries it uses are freed without wiping: in age and scrypt
+(see the note at the top of `crates/holvard-core/src/vault.rs`), and in
+the zip and deflate code that packs and unpacks the contents.
 
 ## Recovery with standard tools
 

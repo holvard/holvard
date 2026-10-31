@@ -606,3 +606,17 @@ fn recover_refuses_an_oversized_file() -> TestResult {
     assert!(stderr(&refused).contains("too big"), "{}", stderr(&refused));
     Ok(())
 }
+
+#[test]
+fn version_says_the_format_is_a_draft() -> TestResult {
+    let t = TempDir::new()?;
+    let out = holvard(&["-V"], &t.0)?;
+    assert_eq!(
+        String::from_utf8(out.stdout)?,
+        format!(
+            "holvard {} (format v1, draft, not frozen)\n",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    Ok(())
+}
