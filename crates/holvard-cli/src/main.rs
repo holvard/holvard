@@ -11,6 +11,7 @@ compile_error!("the holvard command supports macOS and Linux for now");
 
 mod args;
 mod create;
+mod disk;
 mod pack;
 mod recover;
 mod screen;

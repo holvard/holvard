@@ -462,9 +462,20 @@ fn ctrl_c_on_a_card_restores_the_terminal() -> TestResult {
         "terminal left on the alternate screen"
     );
     assert!(
-        after.contains("\x1b[?1049lholvard: stopped before all cards were shown"),
+        after.contains("\x1b[?1049lholvard: stopped; no vault was saved"),
         "{after:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn ctrl_c_on_a_card_saves_nothing() -> TestResult {
+    let t = TempDir::new()?;
+    sample(&t.0)?;
+    ctrl_c_on_card_screen(&["create", "docs"], &t.0)?;
+    // The vault was written before the first card; Ctrl-C removes it, so
+    // nothing blocks the next run.
+    assert!(!t.0.join("vault.age").exists());
     Ok(())
 }
 
@@ -529,5 +540,40 @@ fn each_command_help_mentions_memory() -> TestResult {
         let text = String::from_utf8(help.stdout)?;
         assert!(text.contains(expected), "{command}: {text}");
     }
+    Ok(())
+}
+
+#[test]
+fn cards_file_in_a_missing_folder_leaves_nothing() -> TestResult {
+    let t = TempDir::new()?;
+    sample(&t.0)?;
+    let refused = holvard(
+        &["create", "docs", "--cards-file", "missing/cards.txt"],
+        &t.0,
+    )?;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("missing/cards.txt"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!t.0.join("vault.age").exists());
+    Ok(())
+}
+
+#[test]
+fn ctrl_d_on_a_card_stops_and_saves_nothing() -> TestResult {
+    let t = TempDir::new()?;
+    sample(&t.0)?;
+    let log = type_on_card_screen(&["create", "docs"], &t.0, &[b"\x04"])?;
+    let after = after_alternate(&log).ok_or("no alternate screen")?;
+    let left = after
+        .find("\x1b[?1049l")
+        .ok_or("terminal left on the alternate screen")?;
+    let said = after
+        .find("input ended before all cards were shown; no vault was saved")
+        .ok_or_else(|| format!("{after:?}"))?;
+    assert!(left < said, "{after:?}");
+    assert!(!t.0.join("vault.age").exists());
     Ok(())
 }

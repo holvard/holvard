@@ -4,14 +4,13 @@
 //! `holvard create`: pack a folder, encrypt it into a new vault, and hand
 //! out the three cards.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::fs;
 use std::path::Path;
 
 use zeroize::Zeroizing;
 
 use crate::Failure;
+use crate::disk::{self, NewFile};
 use crate::pack;
 use crate::screen::{self, Tty};
 
@@ -23,20 +22,16 @@ const BIG_NOTE: u64 = 100 * 1024 * 1024;
 const VAULT_MODE: u32 = 0o644;
 const CARDS_MODE: u32 = 0o600;
 
-/// Where the cards go.
-enum CardsTo<'a> {
-    File(&'a Path),
-    Screen(Tty),
-}
-
 /// Runs `holvard create`.
 pub fn run(folder: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Result<(), Failure> {
     let out = out.unwrap_or(Path::new(DEFAULT_OUT));
     // Everything that can be checked before any work.
     refuse_existing(out)?;
-    let cards_to = if let Some(path) = cards_file {
+    if let Some(path) = cards_file {
         refuse_existing(path)?;
-        CardsTo::File(path)
+    }
+    let mut tty = if cards_file.is_some() {
+        None
     } else {
         if !screen::interactive() {
             return Err(Failure(
@@ -44,8 +39,18 @@ pub fn run(folder: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resu
                     .into(),
             ));
         }
-        CardsTo::Screen(Tty::open().map_err(|e| Failure(format!("cannot open the terminal: {e}")))?)
+        Some(Tty::open().map_err(|e| Failure(format!("cannot open the terminal: {e}")))?)
     };
+    // Both outputs exist from here on, so a path that cannot be written
+    // fails now, not after the work. Until `keep`, a failure removes them.
+    let create = |path: &Path, mode| {
+        NewFile::create(path, mode)
+            .map_err(|e| Failure(format!("cannot write {}: {e}", path.display())))
+    };
+    let mut vault_file = create(out, VAULT_MODE)?;
+    let mut cards_out = cards_file
+        .map(|path| create(path, CARDS_MODE))
+        .transpose()?;
 
     screen::set_stop_message(Some("stopped; no vault was saved".into()));
     // Scan first, so sizes are known before anything big is allocated.
@@ -63,28 +68,39 @@ pub fn run(folder: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resu
     // Save the vault before showing any card: cards for a vault that was
     // never saved would be useless.
     let vault = holvard_core::vault::create_vault(&zip).map_err(|e| Failure(e.to_string()))?;
-    write_new(out, &vault.encrypted, VAULT_MODE)?;
-    screen::set_stop_message(Some(format!(
-        "stopped before all cards were shown; {} was saved but its cards are incomplete. \
-         Delete it and run create again.",
-        out.display()
-    )));
+    let failed = |path: &Path| {
+        let shown = path.display().to_string();
+        move |e| Failure(format!("cannot write {shown}: {e}; no vault was saved"))
+    };
+    vault_file
+        .write_synced(&vault.encrypted)
+        .map_err(failed(out))?;
 
     let [a, b, c] = &vault.cards;
     let cards = [a.as_str(), b.as_str(), c.as_str()];
-    match cards_to {
-        CardsTo::File(path) => {
-            write_new(path, cards_file_text(cards).as_bytes(), CARDS_MODE)?;
-            eprintln!(
-                "holvard: {} holds all three cards. Anyone with it can open the vault. \
-                 Print it, then delete it.",
-                path.display()
-            );
-        }
-        CardsTo::Screen(mut tty) => show_cards(&mut tty, cards)
-            .map_err(|e| Failure(format!("could not show the cards: {e}")))?,
+    if let Some(file) = cards_out.as_mut() {
+        let path = file.path().to_path_buf();
+        file.write_synced(cards_file_text(cards).as_bytes())
+            .map_err(failed(&path))?;
     }
-    screen::set_stop_message(None);
+    if let Some(tty) = tty.as_mut() {
+        show_cards(tty, cards)
+            .map_err(|e| Failure(format!("could not show the cards: {e}; no vault was saved")))?;
+    }
+    for path in std::iter::once(out).chain(cards_file) {
+        disk::sync_folder(disk::parent_of(path)).map_err(failed(path))?;
+    }
+    // A stop (Ctrl-C) before this removes both files; after it, nothing.
+    disk::keep_all(std::iter::once(vault_file).chain(cards_out), || {
+        screen::set_stop_message(None);
+    });
+    if let Some(path) = cards_file {
+        eprintln!(
+            "holvard: {} holds all three cards. Anyone with it can open the vault. \
+             Print it, then delete it.",
+            path.display()
+        );
+    }
     println!("Saved {} ({}).", out.display(), crate::files(scanned.files));
     println!(
         "Any two cards open the vault. Give each card to a different person or place; \
@@ -102,19 +118,6 @@ pub fn refuse_existing(path: &Path) -> Result<(), Failure> {
         )));
     }
     Ok(())
-}
-
-/// Writes a new file; never overwrites, even one that appeared since the
-/// check.
-fn write_new(path: &Path, data: &[u8], mode: u32) -> Result<(), Failure> {
-    let failed = |e| Failure(format!("cannot write {}: {e}", path.display()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(path)
-        .map_err(failed)?;
-    file.write_all(data).map_err(failed)
 }
 
 /// The cards file: `card-1: <words>` and so on, one per line, in a buffer
@@ -136,12 +139,19 @@ fn cards_file_text(cards: [&str; 3]) -> Zeroizing<String> {
 }
 
 /// Shows each card alone on the alternate screen and waits for Enter.
+/// Input ending before the last card (Ctrl-D) is an error: a card the
+/// owner never confirmed may not have been written down.
 fn show_cards(tty: &mut Tty, cards: [&str; 3]) -> std::io::Result<()> {
     let mut alternate = tty.alternate()?;
     for (number, card) in (1usize..).zip(cards) {
         alternate.clear()?;
         alternate.say(&screen::format_card(number, card))?;
-        alternate.wait_enter()?;
+        if !alternate.wait_enter()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "input ended before all cards were shown",
+            ));
+        }
     }
     Ok(())
 }
