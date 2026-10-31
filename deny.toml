@@ -9,6 +9,20 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # basic-toml is unmaintained. It is reached only through age's
+    # compile-time translation macros (i18n-embed-fl, i18n-embed-impl ->
+    # i18n-config); none of it is in the binary. Remove when age or
+    # i18n-config drops it; check at every age update. Approved 2026-10-22.
+    { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's translation macros; no fix upstream" },
+    # crypto-bigint 0.5 has timing side channels; fixed only in 0.7.6. It is
+    # reached only through age's P-256 tag recipients (p256, hpke ->
+    # elliptic-curve 0.13). Holvard uses scrypt stanzas only; no p256,
+    # elliptic-curve or crypto-bigint code is in the binary (checked with nm
+    # on a release build). Remove when age moves to elliptic-curve 0.14;
+    # check at every age update. Approved 2026-10-31.
+    { id = "RUSTSEC-2026-0387", reason = "only via age's P-256 recipients, which Holvard never uses; not in the binary; no fix for crypto-bigint 0.5" },
+]
 
 [licenses]
 version = 2
