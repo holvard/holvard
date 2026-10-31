@@ -7,11 +7,15 @@
 
 use core::fmt;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read as _, Write as _};
-use std::os::unix::fs::MetadataExt as _;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use zeroize::{Zeroize as _, Zeroizing};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -119,13 +123,59 @@ struct Entry {
 
 enum Kind {
     Folder,
-    /// Size and identity as seen by `symlink_metadata`, checked again when
-    /// the file is opened.
+    /// Size and identity as listed, checked again when the file is opened.
     File {
         size: u64,
-        dev: u64,
-        ino: u64,
+        id: Id,
     },
+}
+
+/// Device and inode: what makes a file or folder the same one, whatever
+/// path reaches it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Id {
+    dev: u64,
+    ino: u64,
+}
+
+/// The field types of `stat` differ between platforms (`st_dev` is an
+/// `i32` on macOS, a `u64` on Linux), so they are converted generically.
+fn to_u64<T: TryInto<u64>>(value: T) -> Option<u64> {
+    value.try_into().ok()
+}
+
+fn id_of(stat: &rustix::fs::Stat, path: &Path) -> Result<Id, PackError> {
+    match (to_u64(stat.st_dev), to_u64(stat.st_ino)) {
+        (Some(dev), Some(ino)) => Ok(Id { dev, ino }),
+        _ => Err(PackError::Io(
+            path.to_path_buf(),
+            io::Error::other("device or inode number out of range"),
+        )),
+    }
+}
+
+fn errno(path: &Path) -> impl FnOnce(Errno) -> PackError + '_ {
+    move |e| PackError::Io(path.to_path_buf(), e.into())
+}
+
+/// Opens a queued folder without following a link in its last part, and
+/// checks it is the folder that was listed. A link, or another folder
+/// put in its place (or reached through a swapped parent), is `Changed`.
+fn open_folder(path: &Path, id: Id) -> Result<OwnedFd, PackError> {
+    let changed = || PackError::Changed(path.to_path_buf());
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = rustix::fs::open(path, flags, Mode::empty()).map_err(|e| {
+        if e == Errno::LOOP || e == Errno::NOTDIR {
+            changed()
+        } else {
+            errno(path)(e)
+        }
+    })?;
+    let stat = rustix::fs::fstat(&handle).map_err(errno(path))?;
+    if id_of(&stat, path)? != id {
+        return Err(changed());
+    }
+    Ok(handle)
 }
 
 /// What `scan` found. Nothing has been read yet, so a caller can warn
@@ -179,12 +229,23 @@ fn check_name(name: &str, path: &Path) -> Result<(), PackError> {
 /// with a list instead of recursion, so deep trees cannot overflow the
 /// stack.
 fn walk(folder: &Path, limits: &Limits) -> Result<Vec<Entry>, PackError> {
+    walk_with(folder, limits, &mut |_| {})
+}
+
+/// `walk`, calling `before_open` with each queued folder's path just
+/// before it is opened: the gap the tests use to swap things.
+fn walk_with(
+    folder: &Path,
+    limits: &Limits,
+    before_open: &mut dyn FnMut(&Path),
+) -> Result<Vec<Entry>, PackError> {
     let io_error = |path: &Path| {
         let path = path.to_path_buf();
         move |e| PackError::Io(path, e)
     };
     let root = fs::canonicalize(folder).map_err(io_error(folder))?;
-    if !fs::metadata(&root).map_err(io_error(&root))?.is_dir() {
+    let root_stat = rustix::fs::stat(&root).map_err(errno(&root))?;
+    if FileType::from_raw_mode(root_stat.st_mode) != FileType::Directory {
         return Err(PackError::NotAFolder(folder.to_path_buf()));
     }
     let top = root
@@ -200,43 +261,50 @@ fn walk(folder: &Path, limits: &Limits) -> Result<Vec<Entry>, PackError> {
         kind: Kind::Folder,
     }];
     let mut bytes = 0u64;
-    let mut folders = vec![(root.clone(), format!("{top}/"))];
-    while let Some((folder, prefix)) = folders.pop() {
-        for item in fs::read_dir(&folder).map_err(io_error(&folder))? {
-            let path = item.map_err(io_error(&folder))?.path();
-            let meta = fs::symlink_metadata(&path).map_err(io_error(&path))?;
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| PackError::BadName(path.clone()))?;
+    let mut folders = vec![(root.clone(), format!("{top}/"), id_of(&root_stat, &root)?)];
+    while let Some((folder, prefix, id)) = folders.pop() {
+        before_open(&folder);
+        // Everything below is read through this handle, never by path.
+        let handle = open_folder(&folder, id)?;
+        for item in Dir::read_from(&handle).map_err(errno(&folder))? {
+            let item = item.map_err(errno(&folder))?;
+            let raw = item.file_name();
+            if matches!(raw.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let path = folder.join(OsStr::from_bytes(raw.to_bytes()));
+            let stat = rustix::fs::statat(&handle, raw, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(errno(&path))?;
+            let name = core::str::from_utf8(raw.to_bytes())
+                .map_err(|_| PackError::BadName(path.clone()))?;
             check_name(name, &path)?;
-            let kind = meta.file_type();
-            let entry = if kind.is_symlink() {
-                return Err(PackError::Symlink(path));
-            } else if kind.is_dir() {
-                let name = format!("{prefix}{name}/");
-                folders.push((path.clone(), name.clone()));
-                Entry {
-                    name,
-                    path,
-                    kind: Kind::Folder,
+            let entry = match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Symlink => return Err(PackError::Symlink(path)),
+                FileType::Directory => {
+                    let name = format!("{prefix}{name}/");
+                    folders.push((path.clone(), name.clone(), id_of(&stat, &path)?));
+                    Entry {
+                        name,
+                        path,
+                        kind: Kind::Folder,
+                    }
                 }
-            } else if kind.is_file() {
-                bytes = bytes.checked_add(meta.len()).ok_or(PackError::TooBig)?;
-                if bytes > limits.max_bytes {
-                    return Err(PackError::TooBig);
+                FileType::RegularFile => {
+                    let size = u64::try_from(stat.st_size).map_err(|_| PackError::TooBig)?;
+                    bytes = bytes.checked_add(size).ok_or(PackError::TooBig)?;
+                    if bytes > limits.max_bytes {
+                        return Err(PackError::TooBig);
+                    }
+                    Entry {
+                        name: format!("{prefix}{name}"),
+                        kind: Kind::File {
+                            size,
+                            id: id_of(&stat, &path)?,
+                        },
+                        path,
+                    }
                 }
-                Entry {
-                    name: format!("{prefix}{name}"),
-                    path,
-                    kind: Kind::File {
-                        size: meta.len(),
-                        dev: meta.dev(),
-                        ino: meta.ino(),
-                    },
-                }
-            } else {
-                return Err(PackError::Special(path));
+                _ => return Err(PackError::Special(path)),
             };
             entries.push(entry);
             if entries.len() > limits.max_entries {
@@ -248,19 +316,26 @@ fn walk(folder: &Path, limits: &Limits) -> Result<Vec<Entry>, PackError> {
     Ok(entries)
 }
 
-/// Opens the file, checks it is still the one `walk` saw (same device and
-/// inode, so a path swapped for a link is caught), and reads exactly
+/// Opens the file without following a link in its last part, checks it
+/// is still the one `walk` listed (same device and inode, so a path
+/// swapped for a link or another file is caught), and reads exactly
 /// `size` bytes into a buffer allocated once. One more byte means the
 /// file grew; fewer means it shrank.
-fn read_file(path: &Path, size: u64, dev: u64, ino: u64) -> Result<Zeroizing<Vec<u8>>, PackError> {
+fn read_file(path: &Path, size: u64, id: Id) -> Result<Zeroizing<Vec<u8>>, PackError> {
     let changed = || PackError::Changed(path.to_path_buf());
-    let mut file = File::open(path).map_err(|e| PackError::Io(path.to_path_buf(), e))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| PackError::Io(path.to_path_buf(), e))?;
-    if (meta.dev(), meta.ino()) != (dev, ino) {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = rustix::fs::open(path, flags, Mode::empty()).map_err(|e| {
+        if e == Errno::LOOP {
+            changed()
+        } else {
+            errno(path)(e)
+        }
+    })?;
+    let stat = rustix::fs::fstat(&handle).map_err(errno(path))?;
+    if id_of(&stat, path)? != id {
         return Err(changed());
     }
+    let mut file = File::from(handle);
     let length = usize::try_from(size).map_err(|_| PackError::TooBig)?;
     let mut data = Zeroizing::new(vec![0u8; length]);
     file.read_exact(&mut data).map_err(|e| {
@@ -316,14 +391,14 @@ fn write_zip(entries: &[Entry], capacity: usize) -> Result<Zeroizing<Vec<u8>>, P
                     zip.add_directory(entry.name.as_str(), options)
                         .map_err(|e| zip_error(&e))?;
                 }
-                Kind::File { size, dev, ino } => {
+                Kind::File { size, id } => {
                     let options = SimpleFileOptions::default()
                         .compression_method(CompressionMethod::Deflated)
                         .unix_permissions(FILE_MODE)
                         .large_file(size >= 0xFFFF_FFFF);
                     zip.start_file(entry.name.as_str(), options)
                         .map_err(|e| zip_error(&e))?;
-                    let data = read_file(&entry.path, size, dev, ino)?;
+                    let data = read_file(&entry.path, size, id)?;
                     zip.write_all(&data).map_err(|e| zip_error(&e))?;
                 }
             }
@@ -626,6 +701,111 @@ mod tests {
         Ok(())
     }
 
+    /// A path as the walk sees it (the temp folder may sit behind a link,
+    /// as /var does on macOS).
+    fn real(path: &Path) -> io::Result<PathBuf> {
+        fs::canonicalize(path)
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_is_refused() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let outside = t.0.join("outside");
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("stolen.txt"), b"not yours")?;
+        let sub = real(&docs)?.join("sub");
+        let moved = t.0.join("sub-moved");
+        let result = walk_with(&docs, &LIMITS, &mut |path| {
+            if path == sub {
+                let _ = fs::rename(&sub, &moved);
+                let _ = std::os::unix::fs::symlink(&outside, &sub);
+            }
+        });
+        assert!(fs::symlink_metadata(&sub)?.file_type().is_symlink());
+        assert!(
+            matches!(&result, Err(PackError::Changed(p)) if *p == sub),
+            "{:?}",
+            result.map(|e| e.into_iter().map(|e| e.name).collect::<Vec<_>>())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_replaced_by_another_folder_is_refused() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let sub = real(&docs)?.join("sub");
+        let moved = t.0.join("sub-moved");
+        let result = walk_with(&docs, &LIMITS, &mut |path| {
+            if path == sub {
+                let _ = fs::rename(&sub, &moved);
+                let _ = fs::create_dir(&sub);
+                let _ = fs::write(sub.join("new.txt"), b"other");
+            }
+        });
+        assert!(sub.join("new.txt").exists());
+        assert!(
+            matches!(&result, Err(PackError::Changed(p)) if *p == sub),
+            "{:?}",
+            result.map(|e| e.into_iter().map(|e| e.name).collect::<Vec<_>>())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_parent_swapped_for_a_link_is_refused() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let outside = t.0.join("outside");
+        fs::create_dir_all(outside.join("deeper"))?;
+        fs::write(outside.join("deeper/stolen.txt"), b"not yours")?;
+        let sub = real(&docs)?.join("sub");
+        let deeper = sub.join("deeper");
+        let moved = t.0.join("sub-moved");
+        let result = walk_with(&docs, &LIMITS, &mut |path| {
+            if path == deeper {
+                let _ = fs::rename(&sub, &moved);
+                let _ = std::os::unix::fs::symlink(&outside, &sub);
+            }
+        });
+        assert!(fs::symlink_metadata(&sub)?.file_type().is_symlink());
+        assert!(
+            matches!(&result, Err(PackError::Changed(p)) if *p == deeper),
+            "{:?}",
+            result.map(|e| e.into_iter().map(|e| e.name).collect::<Vec<_>>())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_link_is_refused() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let outside = t.0.join("outside.txt");
+        fs::write(&outside, b"hello")?; // same size as a.txt
+        let scanned = scan(&docs, &LIMITS)?;
+        let a = real(&docs)?.join("a.txt");
+        fs::remove_file(&a)?;
+        std::os::unix::fs::symlink(&outside, &a)?;
+        assert!(matches!(scanned.write(), Err(PackError::Changed(p)) if p == a));
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_replaced_by_another_file_is_refused() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let scanned = scan(&docs, &LIMITS)?;
+        // Same size, a plain file, but not the one that was listed.
+        let other = t.0.join("other.txt");
+        fs::write(&other, b"HELLO")?;
+        let a = real(&docs)?.join("a.txt");
+        fs::rename(&other, &a)?;
+        assert!(matches!(scanned.write(), Err(PackError::Changed(p)) if p == a));
+        Ok(())
+    }
+
     #[test]
     fn names_that_would_not_round_trip_are_refused() -> TestResult {
         for bad in ["back\\slash", "tab\there", "bell\u{7}"] {
@@ -710,17 +890,16 @@ mod tests {
         let t = TempDir::new()?;
         let path = t.0.join("f");
         fs::write(&path, b"12345")?;
-        let meta = fs::symlink_metadata(&path)?;
-        let (dev, ino) = (meta.dev(), meta.ino());
-        assert_eq!(read_file(&path, 5, dev, ino)?.as_slice(), b"12345");
+        let id = id_of(&rustix::fs::stat(&path)?, &path)?;
+        assert_eq!(read_file(&path, 5, id)?.as_slice(), b"12345");
         fs::write(&path, b"123456")?; // grew
         assert!(matches!(
-            read_file(&path, 5, dev, ino),
+            read_file(&path, 5, id),
             Err(PackError::Changed(_))
         ));
         fs::write(&path, b"1234")?; // shrank
         assert!(matches!(
-            read_file(&path, 5, dev, ino),
+            read_file(&path, 5, id),
             Err(PackError::Changed(_))
         ));
         // Moved aside, not removed: Linux gives a freed inode number to the
@@ -730,7 +909,7 @@ mod tests {
         fs::write(&other, b"12345")?;
         std::os::unix::fs::symlink(&other, &path)?; // swapped for a link
         assert!(matches!(
-            read_file(&path, 5, dev, ino),
+            read_file(&path, 5, id),
             Err(PackError::Changed(_))
         ));
         Ok(())

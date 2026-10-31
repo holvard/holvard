@@ -23,6 +23,9 @@ zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2
 # Ctrl-C handling, so the terminal is restored when cards are on screen.
 # Only the signal iterator. Approved 2026-10-16.
 signal-hook = { version = "0.4.5", default-features = false, features = ["iterator"] }
+# Folder handles and no-follow opens for the walk in holvard create
+# (openat, fstat). Chosen over nix for its stable 1.x API. Approved 2026-10-22.
+rustix = { version = "1.1.5", default-features = false, features = ["fs", "std"] }
 
 # Everything is deny, not warn: CI builds with -D warnings, so a warning
 # here would pass locally and fail in CI.

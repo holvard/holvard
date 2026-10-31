@@ -22,6 +22,7 @@ holvard-core.workspace = true
 zeroize.workspace = true
 zip.workspace = true
 signal-hook.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true
