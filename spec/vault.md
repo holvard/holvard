@@ -64,18 +64,23 @@ The tables above say how a vault is written. A reader opening a vault must
 also refuse anything outside them, in this order, before doing the
 expensive work:
 
-1. **Header size.** The whole age header, up to and including the newline
+1. **Vault size.** A vault file is a regular file of at most 4.5 GiB
+   (4 831 838 208 bytes): the 4 GiB contents limit plus room for zip
+   headers and age's overhead. Readers refuse anything larger, and
+   anything that is not a regular file (a pipe or a device), before
+   reading it.
+2. **Header size.** The whole age header, up to and including the newline
    that ends its MAC line (the line starting `---`), must fit in the first
    1024 bytes. A Holvard header is about 150 bytes; age
    header parsing can take seconds on a crafted header of several hundred
    kilobytes.
-2. **Cards.** Exactly two cards, not the same card twice, and each must
+3. **Cards.** Exactly two cards, not the same card twice, and each must
    have: one group (group count 1, so group threshold 1), member threshold
    2, iteration exponent 0 and a 256-bit secret. The extendable flag may be
    either value. This is checked before SLIP-39 decryption, whose PBKDF2
    cost is set by the cards themselves: exponent 15 would cost 2^15 times
    the normal work.
-3. **Vault file.** A binary age v1 file with a single `scrypt` stanza and a
+4. **Vault file.** A binary age v1 file with a single `scrypt` stanza and a
    work factor of at most 20. An armored file (`age -a`), or one encrypted
    to any other kind of recipient, is not a Holvard vault, and readers
    should say so rather than blame the cards.

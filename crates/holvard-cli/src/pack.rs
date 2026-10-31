@@ -35,6 +35,10 @@ pub const LIMITS: Limits = Limits {
     max_bytes: 4 * 1024 * 1024 * 1024,
 };
 
+/// spec/vault.md: the largest vault file a reader accepts, 4.5 GiB: the
+/// 4 GiB of contents plus room for zip headers and age's own overhead.
+pub const MAX_VAULT: u64 = 4_831_838_208;
+
 /// Why a folder could not be packed or a zip unpacked.
 #[derive(Debug)]
 pub enum PackError {
@@ -445,6 +449,7 @@ pub fn unpack(bytes: &[u8], dest: &Path, limits: &Limits) -> Result<Unpacked, Pa
             limits.max_bytes,
             &mut written,
         )?;
+        sync_folders(dest, &HashSet::from([dest.to_path_buf()]))?;
         return Ok(Unpacked::Contents);
     };
     if archive.len() > limits.max_entries {
@@ -479,7 +484,20 @@ pub fn unpack(bytes: &[u8], dest: &Path, limits: &Limits) -> Result<Unpacked, Pa
             files = files.saturating_add(1);
         }
     }
+    sync_folders(dest, &made)?;
     Ok(Unpacked::Files(files))
+}
+
+/// Syncs every folder this run created, deepest first, so the names in
+/// them are on disk before the staging folder is renamed.
+fn sync_folders(dest: &Path, made: &HashSet<PathBuf>) -> Result<(), PackError> {
+    let mut folders: Vec<&PathBuf> = made.iter().collect();
+    folders.sort_by_key(|path| core::cmp::Reverse(path.components().count()));
+    for path in folders {
+        let shown = path.strip_prefix(dest).unwrap_or(path);
+        crate::disk::sync_folder(path).map_err(|e| PackError::Io(shown.to_path_buf(), e))?;
+    }
+    Ok(())
 }
 
 /// Checks a raw zip name and splits it into its parts: UTF-8, not
@@ -584,7 +602,7 @@ fn write_new_file(
             .read(&mut buffer)
             .map_err(|e| PackError::BadArchive(e.to_string()))?;
         if read == 0 {
-            return Ok(());
+            return file.sync_all().map_err(io_error);
         }
         let count = u64::try_from(read).map_err(|_| PackError::TooBig)?;
         *written = written.checked_add(count).ok_or(PackError::TooBig)?;
@@ -864,6 +882,47 @@ mod tests {
         assert!(pack(&docs, &limit(100)).is_ok());
         assert!(matches!(pack(&docs, &limit(99)), Err(PackError::TooBig)));
         Ok(())
+    }
+
+    #[test]
+    fn the_biggest_vault_create_can_write_is_under_max_vault() -> TestResult {
+        // 10 000 entries, all files but the top folder, each with a
+        // 4096-byte name, holding 4 GiB between them: the most `bound`
+        // allows at the real limits.
+        let files = LIMITS.max_entries.checked_sub(1).ok_or("limits")?;
+        let per_file = LIMITS.max_bytes / u64::try_from(files)?;
+        let name = "n".repeat(4096);
+        let mut entries = vec![Entry {
+            name: name.clone(),
+            path: PathBuf::new(),
+            kind: Kind::Folder,
+        }];
+        for _ in 0..files {
+            entries.push(Entry {
+                name: name.clone(),
+                path: PathBuf::new(),
+                kind: Kind::File {
+                    size: per_file,
+                    id: Id { dev: 0, ino: 0 },
+                },
+            });
+        }
+        let zip = u64::try_from(bound(&entries)?)?;
+        // age: header (at most 1 KiB, spec/vault.md), 16-byte nonce, and
+        // a 16-byte tag per 64 KiB chunk.
+        let chunks = (zip / 65_536).checked_add(1).ok_or("overflow")?;
+        let vault = chunks
+            .checked_mul(16)
+            .and_then(|tags| tags.checked_add(zip))
+            .and_then(|v| v.checked_add(1024 + 16))
+            .ok_or("overflow")?;
+        assert!(vault < MAX_VAULT, "{vault} >= {MAX_VAULT}");
+        Ok(())
+    }
+
+    #[test]
+    fn max_vault_matches_the_spec() {
+        assert_eq!(MAX_VAULT, 4_831_838_208); // 4.5 GiB
     }
 
     #[test]

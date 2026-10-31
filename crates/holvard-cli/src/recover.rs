@@ -6,15 +6,17 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 use holvard_core::vault::{self, Error};
+use rustix::fs::{Mode, OFlags};
 use zeroize::Zeroizing;
 
 use crate::Failure;
 use crate::create::refuse_existing;
+use crate::disk;
 use crate::pack::{self, Unpacked};
 use crate::screen::{self, Line, Tty};
 
@@ -31,8 +33,7 @@ pub fn run(vault: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resul
         .components()
         .collect();
     screen::set_stop_message(Some("stopped; nothing was recovered".into()));
-    let encrypted =
-        fs::read(vault).map_err(|e| Failure(format!("cannot read {}: {e}", vault.display())))?;
+    let encrypted = read_vault(vault)?;
     refuse_existing(&out)?;
     refuse_existing(&staging_path(&out))?;
     let cards = if let Some(path) = cards_file {
@@ -73,6 +74,36 @@ pub fn run(vault: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resul
     }
     println!("These files are not encrypted any more; keep them safe.");
     Ok(())
+}
+
+/// Reads the vault file: only a regular file, at most `MAX_VAULT` bytes.
+/// It is opened non-blocking, so a named pipe cannot hang the open, and
+/// read through `take`, so a file growing meanwhile is caught.
+fn read_vault(path: &Path) -> Result<Vec<u8>, Failure> {
+    let failed = |e: io::Error| Failure(format!("cannot read {}: {e}", path.display()));
+    let too_big = || {
+        Failure(format!(
+            "{} is too big for a vault (4.5 GiB at most)",
+            path.display()
+        ))
+    };
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let handle = rustix::fs::open(path, flags, Mode::empty()).map_err(|e| failed(e.into()))?;
+    let file = File::from(handle);
+    let meta = file.metadata().map_err(failed)?;
+    if !meta.is_file() {
+        return Err(Failure(format!("{} is not a file", path.display())));
+    }
+    if meta.len() > pack::MAX_VAULT {
+        return Err(too_big());
+    }
+    let mut data = Vec::with_capacity(usize::try_from(meta.len()).map_err(|_| too_big())?);
+    let limit = pack::MAX_VAULT.checked_add(1).ok_or_else(too_big)?;
+    file.take(limit).read_to_end(&mut data).map_err(failed)?;
+    if u64::try_from(data.len()).map_err(|_| too_big())? > pack::MAX_VAULT {
+        return Err(too_big());
+    }
+    Ok(data)
 }
 
 /// `<file name without .age>-recovered`, in the current folder. The vault
@@ -142,8 +173,11 @@ impl Staging {
     fn publish(mut self) -> Result<(), Failure> {
         fs::rename(&self.path, &self.out)
             .map_err(|e| Failure(format!("cannot create {}: {e}", self.out.display())))?;
+        // Set before the sync: the staging path is gone now, and the
+        // recovered folder must stay even if only the sync fails.
         self.published = true;
-        Ok(())
+        disk::sync_folder(disk::parent_of(&self.out))
+            .map_err(|e| Failure(format!("cannot save {}: {e}", self.out.display())))
     }
 }
 

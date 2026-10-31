@@ -577,3 +577,32 @@ fn ctrl_d_on_a_card_stops_and_saves_nothing() -> TestResult {
     assert!(!t.0.join("vault.age").exists());
     Ok(())
 }
+
+#[test]
+fn recover_refuses_a_pipe() -> TestResult {
+    let t = TempDir::new()?;
+    let status = std::process::Command::new("mkfifo")
+        .arg(t.0.join("vault.age"))
+        .status()?;
+    assert!(status.success());
+    let refused = holvard(&["recover", "vault.age", "--cards-file", "x"], &t.0)?;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("is not a file"),
+        "{}",
+        stderr(&refused)
+    );
+    Ok(())
+}
+
+#[test]
+fn recover_refuses_an_oversized_file() -> TestResult {
+    let t = TempDir::new()?;
+    // Sparse: takes no disk space, and must never be read.
+    let file = fs::File::create(t.0.join("vault.age"))?;
+    file.set_len(5 * 1024 * 1024 * 1024)?;
+    let refused = holvard(&["recover", "vault.age", "--cards-file", "x"], &t.0)?;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(stderr(&refused).contains("too big"), "{}", stderr(&refused));
+    Ok(())
+}
