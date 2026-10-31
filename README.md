@@ -62,7 +62,13 @@ code as untrusted until independent checks pass:
 - Every AI-assisted commit names the model in its message, with a
   `Co-Authored-By:` trailer (for example `Co-Authored-By: Claude Opus 5.5
   <noreply@anthropic.com>`).
-- AI writes glue code, tests and tooling, never cryptographic primitives.
+- AI writes glue code, tests and tooling. Encryption itself comes from
+  established libraries (age and RustCrypto). The one exception is
+  SLIP-39, which has no maintained Rust library: our own implementation
+  of the published standard (GF(256) arithmetic, Shamir sharing and its
+  Feistel cipher) is checked against Trezor's test vectors and reference
+  implementation in both directions, and needs an independent review
+  before real use.
 - A human maintainer reviews and understands every change before it merges,
   and signs it off under the DCO.
 - Correctness is established by cross-checks against age and the SLIP-39

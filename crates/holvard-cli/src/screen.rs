@@ -7,8 +7,9 @@
 //! `std::io::stdin`, whose shared buffer would keep an unwiped copy.
 //!
 //! Ctrl-C, a closed terminal or a kill signal while the alternate screen is
-//! showing: `handle_interrupts` leaves it, says what was not finished, and
-//! then ends the program the way the signal would have.
+//! showing: `handle_interrupts` removes the files this run created and has
+//! not kept, leaves the screen, says what was not finished, and then ends
+//! the program the way the signal would have.
 //!
 //! Known limits: the kernel's terminal buffer and the terminal program's
 //! own memory are out of our reach; screen recording or terminal logging
@@ -70,9 +71,11 @@ pub fn set_stop_message(message: Option<String>) {
 }
 
 /// Handles Ctrl-C, a closed terminal and termination requests from here
-/// on: a background thread leaves the alternate screen if it is showing,
-/// prints the stop message, and then ends the program as the signal would
-/// have. Without this, Ctrl-C on a card would leave a blank screen.
+/// on: a background thread removes the files this run created and has not
+/// kept, leaves the alternate screen if it is showing, prints the stop
+/// message, and then ends the program as the signal would have. Without
+/// this, Ctrl-C on a card would leave a blank screen, and an unfinished
+/// vault that blocks the next run.
 pub fn handle_interrupts() -> io::Result<()> {
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
     std::thread::spawn(move || {
@@ -82,6 +85,9 @@ pub fn handle_interrupts() -> io::Result<()> {
             // the restored screen.
             begin_stop();
             let _guard = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+            // Files this run created and has not kept go first; held
+            // until the program ends, so none can be kept after this.
+            let _files = crate::disk::remove_unkept();
             let left_alternate = ALTERNATE.swap(false, Ordering::SeqCst);
             if left_alternate && let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
                 let _ = write!(tty, "{LEAVE_ALTERNATE}");
@@ -166,11 +172,18 @@ impl AltScreen<'_> {
         self.tty.say(text)
     }
 
-    /// Waits until Enter is pressed (or the input ends).
-    pub fn wait_enter(&mut self) -> io::Result<()> {
+    /// Waits until Enter is pressed: `true`. `false` if the input ended
+    /// first (Ctrl-D on an empty line gives that on a terminal).
+    pub fn wait_enter(&mut self) -> io::Result<bool> {
         let mut byte = [0u8; 1];
-        while self.tty.file.read(&mut byte)? == 1 && byte != [b'\n'] {}
-        Ok(())
+        loop {
+            if self.tty.file.read(&mut byte)? == 0 {
+                return Ok(false);
+            }
+            if byte == [b'\n'] {
+                return Ok(true);
+            }
+        }
     }
 
     /// Reads one typed line; see [`read_line`].

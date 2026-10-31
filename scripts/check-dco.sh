@@ -3,18 +3,25 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 #
 # Fails if any commit in RANGE (default origin/main..HEAD) lacks a
-# Signed-off-by line matching its author. Commits by bots (Dependabot) are
-# exempt; they can't certify the DCO. See CONTRIBUTING.md.
+# Signed-off-by line matching its author. Commits by Dependabot are exempt;
+# it can't certify the DCO. See CONTRIBUTING.md.
 
 set -eu
 range=${1:-origin/main..HEAD}
 status=0
 
-for sha in $(git rev-list --no-merges "$range"); do
+# Listed first, so a range git cannot resolve stops the script here
+# (set -e does not apply inside a for loop's word list). Needs the full
+# history: in a shallow clone a merge commit's parents are missing, so it
+# is checked as an ordinary commit.
+shas=$(git rev-list --no-merges "$range")
+
+for sha in $shas; do
     author=$(git show -s --format='%an <%ae>' "$sha")
-    case "$author" in
-        *"[bot] <"*) continue ;;
-    esac
+    # Only Dependabot, by its exact author line.
+    if [ "$author" = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>" ]; then
+        continue
+    fi
     if ! git show -s --format='%B' "$sha" | grep -qF "Signed-off-by: $author"; then
         echo "Commit $(git show -s --format='%h %s' "$sha")" >&2
         echo "  lacks: Signed-off-by: $author" >&2

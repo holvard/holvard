@@ -149,6 +149,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: The sign-off check fails on a range git cannot resolve
+        run: |
+          if scripts/check-dco.sh no-such-revision..HEAD; then
+            echo "check-dco.sh passed on a bad range" >&2
+            exit 1
+          fi
       - name: Check sign-off
         env:
           EVENT: ${{ github.event_name }}

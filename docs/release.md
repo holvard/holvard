@@ -39,7 +39,10 @@ sha256sum -c SHA256SUMS
 
 ## Reproducing a build
 
-A release binary must be byte-for-byte reproducible from its tag.
+The goal is that every release binary can be rebuilt byte for byte from
+its tag. No release exists yet, and no build has been reproduced
+independently; until one has, treat this section as the intended
+process, not a demonstrated one.
 
 What makes that possible:
 

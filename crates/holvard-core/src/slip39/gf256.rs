@@ -5,15 +5,17 @@
 //!
 //! The field is the one AES uses: polynomials over GF(2) modulo
 //! x^8 + x^4 + x^3 + x + 1. Adding two elements is XOR. Both functions here
-//! run in the same time whatever the inputs, with no lookup tables, so the
-//! secret bytes they handle cannot leak through timing or the CPU cache.
+//! are written without branches or lookup tables that depend on the
+//! values, so the secret bytes they handle should not leak through timing
+//! or the CPU cache. That is a property of the source; the timing of the
+//! compiled code has not been measured.
 
 /// Multiplies two field elements.
 ///
 /// Schoolbook multiplication, one bit of `b` per step: add `a` when the bit
 /// is set, then multiply `a` by x (shift left, reducing by 0x1b when the
-/// top bit falls off). Masks replace branches so timing does not depend
-/// on the values.
+/// top bit falls off). Masks replace branches, so there is no branch on
+/// the values.
 pub(crate) fn mul(a: u8, b: u8) -> u8 {
     let mut a = a;
     let mut b = b;
