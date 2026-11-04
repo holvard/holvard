@@ -172,3 +172,33 @@ jobs:
             # nothing to compare against, so check the whole history.
             scripts/check-dco.sh "$AFTER"
           fi
+
+  crate-age:
+    name: Crate age (7-day cooldown)
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The crate-age check passes its own tests
+        run: scripts/test-crate-age.sh
+      - name: Check crate age
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            scripts/check-crate-age.sh "$PR_BASE" "$PR_HEAD"
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            scripts/check-crate-age.sh "$BEFORE" "$AFTER"
+          else
+            # First push (before is all zeros) or force-push (old tip gone):
+            # nothing to compare against, so check the whole lock.
+            scripts/check-crate-age.sh "$AFTER"
+          fi

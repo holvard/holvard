@@ -15,6 +15,13 @@ Signed-off-by: Your Name <you@example.com>
 author. CI rejects pull requests and pushes to `main` with unsigned commits
 (`scripts/check-dco.sh`). Only Dependabot's commits are exempt.
 
+## New crates wait a week
+
+CI fails a pull request that adds or changes a crate in `Cargo.lock` that was
+published less than 7 days ago (`scripts/check-crate-age.sh`), so others have
+time to notice a compromised release. If a fix can't wait (a security
+advisory, say), list the version in `.github/crate-age-allow` with the reason.
+
 ## AI-assisted contributions
 
 If an AI model helped write a commit, name it in a trailer:
