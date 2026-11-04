@@ -5,6 +5,8 @@
 # updates the tag comment. age (AGE_VERSION/AGE_SHA256 in ci.yml) and the Rust
 # toolchain (rust-toolchain.toml) are bumped by hand. The cooldown waits a week
 # after a release, so a compromised version is likely caught before we take it.
+# For Cargo.lock-only updates Dependabot skips it (dependabot-core#16428), so
+# CI enforces it too: scripts/check-crate-age.sh.
 version: 2
 updates:
   - package-ecosystem: github-actions

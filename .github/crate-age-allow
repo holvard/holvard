@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Holvard contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Crate versions allowed into Cargo.lock before they are 7 days old, for
+# scripts/check-crate-age.sh. One per line: name@version, then the reason
+# (for example the advisory it fixes). Remove an entry once it is a week old.
