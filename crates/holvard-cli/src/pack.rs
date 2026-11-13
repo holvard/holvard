@@ -380,14 +380,80 @@ fn bound(entries: &[Entry]) -> Result<usize, PackError> {
     usize::try_from(total).map_err(|_| PackError::TooBig)
 }
 
-/// Writes the zip into a buffer of exactly `capacity` bytes, through a
-/// `Cursor` over a fixed slice, which cannot grow: running out of room is
+/// A writer over a fixed slice, which cannot grow: running out of room is
 /// an error, never a reallocation that would leave an unwiped copy.
+///
+/// Unlike a `Cursor` over the slice, its end is the last byte written, not
+/// the end of the slice. The zip crate seeks to the end when it finishes,
+/// to look for stale data after its directory; with a `Cursor` it took the
+/// unused room for such data and wrote its directory again at the very
+/// end, so the zip filled the whole buffer and compression saved nothing.
+struct SliceWriter<'a> {
+    slice: &'a mut [u8],
+    position: usize,
+    /// One past the last byte written.
+    end: usize,
+}
+
+impl<'a> SliceWriter<'a> {
+    fn new(slice: &'a mut [u8]) -> Self {
+        Self {
+            slice,
+            position: 0,
+            end: 0,
+        }
+    }
+}
+
+impl io::Write for SliceWriter<'_> {
+    /// Writes as much as fits; 0 when the slice is full, which `write_all`
+    /// turns into an error.
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let room = self.slice.get_mut(self.position..).unwrap_or_default();
+        let count = data.len().min(room.len());
+        if let (Some(to), Some(from)) = (room.get_mut(..count), data.get(..count)) {
+            to.copy_from_slice(from);
+        }
+        self.position = self.position.saturating_add(count);
+        self.end = self.end.max(self.position);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl io::Seek for SliceWriter<'_> {
+    /// Seeks within the slice; `End` counts from the last byte written.
+    fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let outside = || io::Error::new(io::ErrorKind::InvalidInput, "seek outside the buffer");
+        let from = |base: usize, offset: i64| {
+            u64::try_from(base)
+                .ok()
+                .and_then(|base| base.checked_add_signed(offset))
+        };
+        let target = match to {
+            io::SeekFrom::Start(offset) => Some(offset),
+            io::SeekFrom::Current(offset) => from(self.position, offset),
+            io::SeekFrom::End(offset) => from(self.end, offset),
+        };
+        let position = target
+            .and_then(|t| usize::try_from(t).ok())
+            .filter(|&p| p <= self.slice.len())
+            .ok_or_else(outside)?;
+        self.position = position;
+        u64::try_from(position).map_err(|_| outside())
+    }
+}
+
+/// Writes the zip into a buffer of exactly `capacity` bytes, through a
+/// `SliceWriter`, and shortens the buffer to what the zip used.
 fn write_zip(entries: &[Entry], capacity: usize) -> Result<Zeroizing<Vec<u8>>, PackError> {
     let zip_error = |e: &dyn fmt::Display| PackError::Zip(e.to_string());
     let mut buffer = Zeroizing::new(vec![0u8; capacity]);
     let length = {
-        let mut zip = ZipWriter::new(Cursor::new(buffer.as_mut_slice()));
+        let mut zip = ZipWriter::new(SliceWriter::new(buffer.as_mut_slice()));
         for entry in entries {
             match entry.kind {
                 Kind::Folder => {
@@ -407,8 +473,7 @@ fn write_zip(entries: &[Entry], capacity: usize) -> Result<Zeroizing<Vec<u8>>, P
                 }
             }
         }
-        let cursor = zip.finish().map_err(|e| zip_error(&e))?;
-        usize::try_from(cursor.position()).map_err(|e| zip_error(&e))?
+        zip.finish().map_err(|e| zip_error(&e))?.end
     };
     buffer.truncate(length);
     Ok(buffer)
@@ -929,6 +994,73 @@ mod tests {
     fn real_limits_match_the_spec() {
         assert_eq!(LIMITS.max_entries, 10_000);
         assert_eq!(LIMITS.max_bytes, 4_294_967_296);
+    }
+
+    #[test]
+    fn the_zip_ends_where_its_contents_end() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let scanned = scan(&docs, &LIMITS)?;
+        let zip = scanned.write()?;
+        assert!(zip.len() < bound(&scanned.entries)?);
+        // The end-of-central-directory record (22 bytes, no comment) is last.
+        let end = zip.len().checked_sub(22).ok_or("zip too short")?;
+        assert_eq!(zip.get(end..end + 4), Some(&b"PK\x05\x06"[..]));
+        assert_eq!(names(&zip)?.len(), scanned.entries.len());
+        Ok(())
+    }
+
+    #[test]
+    fn slice_writer_stops_when_the_slice_is_full() -> TestResult {
+        use std::io::Write as _;
+        let mut slice = [0u8; 4];
+        let mut w = SliceWriter::new(&mut slice);
+        assert_eq!(w.write(b"abcdef")?, 4);
+        assert_eq!(w.write(b"g")?, 0);
+        assert!(w.write_all(b"g").is_err());
+        assert_eq!(&slice, b"abcd");
+        Ok(())
+    }
+
+    #[test]
+    fn slice_writer_end_is_the_last_byte_written() -> TestResult {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let mut slice = [0u8; 16];
+        let mut w = SliceWriter::new(&mut slice);
+        w.write_all(b"abcdef")?;
+        // Back to rewrite one byte, as zip does for sizes in local headers.
+        assert_eq!(w.seek(SeekFrom::Start(2))?, 2);
+        w.write_all(b"X")?;
+        assert_eq!(w.seek(SeekFrom::Current(1))?, 4);
+        assert_eq!(w.seek(SeekFrom::End(0))?, 6);
+        assert_eq!(w.seek(SeekFrom::End(-6))?, 0);
+        assert_eq!(w.end, 6);
+        assert_eq!(&slice[..6], b"abXdef");
+        Ok(())
+    }
+
+    #[test]
+    fn slice_writer_cannot_seek_outside_the_slice() -> TestResult {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let mut slice = [0u8; 16];
+        let mut w = SliceWriter::new(&mut slice);
+        w.write_all(b"abcdef")?;
+        assert!(w.seek(SeekFrom::Start(17)).is_err());
+        assert!(w.seek(SeekFrom::End(-7)).is_err());
+        assert!(w.seek(SeekFrom::Current(11)).is_err());
+        assert_eq!(w.seek(SeekFrom::Start(16))?, 16);
+        Ok(())
+    }
+
+    #[test]
+    fn a_compressible_folder_packs_smaller_than_its_data() -> TestResult {
+        let t = TempDir::new()?;
+        let folder = t.0.join("zeros");
+        fs::create_dir(&folder)?;
+        fs::write(folder.join("zeros.bin"), vec![0u8; 1024 * 1024])?;
+        let zip = pack(&folder, &LIMITS)?;
+        assert!(zip.len() < 64 * 1024, "zip is {} bytes", zip.len());
+        Ok(())
     }
 
     #[test]
