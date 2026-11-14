@@ -213,6 +213,13 @@ pub fn scan(folder: &Path, limits: &Limits) -> Result<Scan, PackError> {
 }
 
 impl Scan {
+    /// Whether the scan listed the file with this device and inode.
+    pub fn holds(&self, (dev, ino): (u64, u64)) -> bool {
+        self.entries
+            .iter()
+            .any(|e| matches!(e.kind, Kind::File { id, .. } if id == Id { dev, ino }))
+    }
+
     /// Reads the files and writes the zip into one buffer, allocated once.
     pub fn write(&self) -> Result<Zeroizing<Vec<u8>>, PackError> {
         write_zip(&self.entries, bound(&self.entries)?)
@@ -327,7 +334,9 @@ fn walk_with(
 /// file grew; fewer means it shrank.
 fn read_file(path: &Path, size: u64, id: Id) -> Result<Zeroizing<Vec<u8>>, PackError> {
     let changed = || PackError::Changed(path.to_path_buf());
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // Non-blocking, so a file swapped for a named pipe cannot hang the
+    // open; the identity check below then refuses it.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let handle = rustix::fs::open(path, flags, Mode::empty()).map_err(|e| {
         if e == Errno::LOOP {
             changed()
@@ -872,6 +881,30 @@ mod tests {
         fs::remove_file(&a)?;
         std::os::unix::fs::symlink(&outside, &a)?;
         assert!(matches!(scanned.write(), Err(PackError::Changed(p)) if p == a));
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_named_pipe_is_refused_without_waiting() -> TestResult {
+        let t = TempDir::new()?;
+        let docs = sample(&t.0)?;
+        let scanned = scan(&docs, &LIMITS)?;
+        let a = real(&docs)?.join("a.txt");
+        // Moved aside, not removed, so the pipe gets a new inode.
+        fs::rename(&a, t.0.join("moved"))?;
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&a)
+                .status()?
+                .success()
+        );
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(scanned.write().map(|_| ()));
+        });
+        // Opening a pipe nobody writes to would wait forever.
+        let result = receive.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert!(matches!(result, Err(PackError::Changed(p)) if p == a));
         Ok(())
     }
 

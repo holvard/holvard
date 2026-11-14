@@ -620,3 +620,95 @@ fn version_says_the_format_is_a_draft() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn an_output_inside_the_folder_is_refused() -> TestResult {
+    let t = TempDir::new()?;
+    let docs = sample(&t.0)?;
+    let before = tree(&docs)?;
+
+    let refused = holvard(&["create", ".", "--cards-file", "../cards.txt"], &docs)?;
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("vault.age is inside the folder"),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(tree(&docs)?, before);
+    assert!(!t.0.join("cards.txt").exists());
+
+    let refused = holvard(
+        &[
+            "create",
+            "docs",
+            "-o",
+            "v.age",
+            "--cards-file",
+            "docs/sub/cards.txt",
+        ],
+        &t.0,
+    )?;
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("docs/sub/cards.txt is inside the folder"),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(tree(&docs)?, before);
+    assert!(!t.0.join("v.age").exists());
+    Ok(())
+}
+
+#[test]
+fn ctrl_c_while_unpacking_leaves_nothing() -> TestResult {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let t = TempDir::new()?;
+    // Enough files that unpacking takes a while: each one is synced.
+    let many = t.0.join("many");
+    fs::create_dir(&many)?;
+    for i in 0..1000 {
+        fs::write(many.join(format!("f{i:04}")), b"x")?;
+    }
+    let created = holvard(
+        &["create", "many", "-o", "v.age", "--cards-file", "cards.txt"],
+        &t.0,
+    )?;
+    assert!(created.status.success(), "{}", stderr(&created));
+    let pair = pair_file(&t.0.join("cards.txt"), 1, 2, &t.0.join("pair.txt"))?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_holvard"))
+        .args(["recover", "v.age", "-o", "out", "--cards-file", s(&pair)?])
+        .current_dir(&t.0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let partial = t.0.join("out.partial");
+    let start = Instant::now();
+    while !partial.exists() {
+        if child.try_wait()?.is_some() || start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            return Err("recover ended or never started unpacking".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The shell's own kill: not every system has a kill program.
+    let sent = Command::new("sh")
+        .args(["-c", &format!("kill -INT {}", child.id())])
+        .status()?;
+    assert!(sent.success());
+    let stopped = child.wait_with_output()?;
+    assert!(!stopped.status.success());
+    assert!(
+        stderr(&stopped).contains("stopped; nothing was recovered"),
+        "{}",
+        stderr(&stopped)
+    );
+    let left: Vec<_> = fs::read_dir(&t.0)?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()?;
+    for name in ["out", "out.partial", "out.partial.removing"] {
+        assert!(!left.iter().any(|n| n == name), "{name} left: {left:?}");
+    }
+    Ok(())
+}

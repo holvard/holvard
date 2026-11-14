@@ -5,9 +5,8 @@
 //! new folder.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read as _};
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 use holvard_core::vault::{self, Error};
@@ -16,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::Failure;
 use crate::create::refuse_existing;
-use crate::disk;
+use crate::disk::{self, NewFolder};
 use crate::pack::{self, Unpacked};
 use crate::screen::{self, Line, Tty};
 
@@ -52,15 +51,12 @@ pub fn run(vault: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resul
     let contents =
         vault::open_vault(&[a.as_str(), b.as_str()], &encrypted).map_err(open_failure)?;
 
+    // A stop from here on removes the staging folder, so the message
+    // above stays true until the folder gets its final name.
     let staging = Staging::create(&out)?;
-    screen::set_stop_message(Some(format!(
-        "stopped while unpacking; delete {} if it is still there",
-        staging.path().display()
-    )));
     let unpacked = pack::unpack(&contents, staging.path(), &pack::LIMITS)
         .map_err(|e| Failure(e.to_string()))?;
     staging.publish()?;
-    screen::set_stop_message(None);
     match unpacked {
         Unpacked::Files(count) => {
             println!("Recovered {} into {}.", crate::files(count), out.display());
@@ -139,12 +135,11 @@ fn open_failure(e: Error) -> Failure {
 }
 
 /// A staging folder `<out>.partial` that this run created. It is removed
-/// when dropped unless published, and never touches a folder this run did
-/// not create.
+/// when dropped unless published, or when the program is stopped, and
+/// never touches a folder this run did not create (see `disk::NewFolder`).
 struct Staging {
-    path: PathBuf,
+    folder: NewFolder,
     out: PathBuf,
-    published: bool,
 }
 
 impl Staging {
@@ -152,40 +147,28 @@ impl Staging {
     /// that failure removes nothing.
     fn create(out: &Path) -> Result<Self, Failure> {
         let path = staging_path(out);
-        fs::DirBuilder::new()
-            .mode(STAGING_MODE)
-            .create(&path)
+        let folder = NewFolder::create(&path, STAGING_MODE)
             .map_err(|e| Failure(format!("cannot create {}: {e}", path.display())))?;
         Ok(Self {
-            path,
+            folder,
             out: out.to_path_buf(),
-            published: false,
         })
     }
 
     fn path(&self) -> &Path {
-        &self.path
+        self.folder.path()
     }
 
-    /// Renames the staging folder to `out`. On Unix a rename replaces only
-    /// an empty folder; if `out` appeared meanwhile and is not empty, this
-    /// fails and dropping `self` removes the staging folder.
-    fn publish(mut self) -> Result<(), Failure> {
-        fs::rename(&self.path, &self.out)
+    /// Renames the staging folder to `out` and clears the stop message.
+    /// On Unix a rename replaces only an empty folder; if `out` appeared
+    /// meanwhile and is not empty, this fails and the staging folder is
+    /// removed. The recovered folder stays even if only the sync fails.
+    fn publish(self) -> Result<(), Failure> {
+        self.folder
+            .rename_and_keep(&self.out, || screen::set_stop_message(None))
             .map_err(|e| Failure(format!("cannot create {}: {e}", self.out.display())))?;
-        // Set before the sync: the staging path is gone now, and the
-        // recovered folder must stay even if only the sync fails.
-        self.published = true;
         disk::sync_folder(disk::parent_of(&self.out))
             .map_err(|e| Failure(format!("cannot save {}: {e}", self.out.display())))
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_dir_all(&self.path);
-        }
     }
 }
 
@@ -316,6 +299,7 @@ fn check_typed(
 mod tests {
     use super::*;
     use crate::testutil::{TempDir, TestResult};
+    use std::fs;
 
     #[test]
     fn default_output_names() {
