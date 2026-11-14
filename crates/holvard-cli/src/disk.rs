@@ -1,37 +1,57 @@
 // SPDX-FileCopyrightText: 2026 Holvard contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Files and folders on disk: new files that clean up after a failed or
-//! stopped run, and syncing, so "Saved" and "Recovered" mean on disk.
+//! Files and folders on disk: new files and folders that clean up after a
+//! failed or stopped run, and syncing, so "Saved" and "Recovered" mean on
+//! disk.
 
-use std::fs::{self, File, OpenOptions};
+use std::ffi::OsString;
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use rustix::io::Errno;
 
-/// Files this run created and has not kept, for `remove_unkept` when the
-/// program is stopped (Ctrl-C and the like), which skips every `Drop`.
+/// Files and folders this run created and has not kept, for
+/// `remove_unkept` when the program is stopped (Ctrl-C and the like), which
+/// skips every `Drop`.
 static RESERVED: Mutex<Vec<Reserved>> = Mutex::new(Vec::new());
 
-/// A file this run created: where it is and which file it is.
+/// A file or folder this run created: where it is and which one it is.
 #[derive(Clone, PartialEq, Eq)]
 struct Reserved {
     path: PathBuf,
     dev: u64,
     ino: u64,
+    folder: bool,
 }
 
 impl Reserved {
-    /// Removes the file, but only while its path still names it: a file
-    /// someone else put there meanwhile is left alone.
+    /// Removes the file or folder, but only while its path still names it:
+    /// one someone else put there meanwhile is left alone.
+    ///
+    /// A folder is first renamed to `<name>.removing`: the program may
+    /// still be writing into it, by path, until it ends, and after the
+    /// rename nothing new can appear in what is being removed.
     fn remove(&self) {
         let ours = fs::symlink_metadata(&self.path)
             .is_ok_and(|m| (m.dev(), m.ino()) == (self.dev, self.ino));
-        if ours {
-            // Nothing more can be done if this fails.
+        if !ours {
+            return;
+        }
+        // Nothing more can be done if these fail.
+        if self.folder {
+            let mut aside = OsString::from(self.path.as_os_str());
+            aside.push(".removing");
+            let aside = PathBuf::from(aside);
+            if fs::rename(&self.path, &aside).is_ok() {
+                let _ = fs::remove_dir_all(&aside);
+            } else {
+                let _ = fs::remove_dir_all(&self.path);
+            }
+        } else {
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -59,6 +79,7 @@ impl NewFile {
             path: path.to_path_buf(),
             dev: meta.dev(),
             ino: meta.ino(),
+            folder: false,
         };
         let file = Self {
             file,
@@ -78,9 +99,76 @@ impl NewFile {
     pub fn path(&self) -> &Path {
         &self.reserved.path
     }
+
+    /// Device and inode, to recognise this file wherever it turns up.
+    pub fn id(&self) -> (u64, u64) {
+        (self.reserved.dev, self.reserved.ino)
+    }
 }
 
 impl Drop for NewFile {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let mut list = list();
+        list.retain(|r| *r != self.reserved);
+        self.reserved.remove();
+    }
+}
+
+/// A folder this run created, for unpacking into before it gets its final
+/// name. Dropped without being kept, it is removed with everything in it
+/// (see `Reserved::remove`); if the program is stopped instead,
+/// `remove_unkept` does the same.
+pub struct NewFolder {
+    reserved: Reserved,
+    kept: bool,
+}
+
+impl NewFolder {
+    /// Creates `path` with `mode`; fails if anything is there.
+    pub fn create(path: &Path, mode: u32) -> io::Result<Self> {
+        DirBuilder::new().mode(mode).create(path)?;
+        let meta = fs::symlink_metadata(path)?;
+        let folder = Self {
+            reserved: Reserved {
+                path: path.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+                folder: true,
+            },
+            kept: false,
+        };
+        list().push(folder.reserved.clone());
+        Ok(folder)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.reserved.path
+    }
+
+    /// Renames the folder to `to` and keeps it, then runs `then` (clearing
+    /// the stop message), all under the lock `remove_unkept` takes: a stop
+    /// sees either the folder unrenamed, and removes it, or renamed and
+    /// nothing left to say. On Unix a rename replaces only an empty folder;
+    /// if it fails, the folder is removed.
+    pub fn rename_and_keep(mut self, to: &Path, then: impl FnOnce()) -> io::Result<()> {
+        let mut list = list();
+        if let Err(e) = fs::rename(&self.reserved.path, to) {
+            // Released first: dropping `self` removes the folder and
+            // takes the lock again.
+            drop(list);
+            return Err(e);
+        }
+        self.kept = true;
+        list.retain(|r| *r != self.reserved);
+        then();
+        Ok(())
+    }
+}
+
+impl Drop for NewFolder {
     fn drop(&mut self) {
         if self.kept {
             return;
@@ -116,8 +204,8 @@ pub fn keep_all(files: impl IntoIterator<Item = NewFile>, then: impl FnOnce()) {
     drop(files);
 }
 
-/// The program is being stopped: removes every file this run created and
-/// has not kept. Hold the returned lock until the program ends, so the
+/// The program is being stopped: removes every file and folder this run
+/// created and has not kept. Hold the returned lock until the program ends, so the
 /// main thread cannot keep a file after this.
 #[must_use]
 pub fn remove_unkept() -> impl Sized {
@@ -236,6 +324,7 @@ mod tests {
             path: path.clone(),
             dev: meta.dev(),
             ino: meta.ino(),
+            folder: false,
         };
         // Moved aside, not removed, so the replacement gets a new inode.
         fs::rename(&path, t.0.join("moved"))?;
@@ -245,6 +334,78 @@ mod tests {
         fs::rename(t.0.join("moved"), &path)?;
         ours.remove();
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_folder_not_kept_is_removed_with_its_contents() -> TestResult {
+        let t = TempDir::new()?;
+        let path = t.0.join("out.partial");
+        let folder = NewFolder::create(&path, 0o700)?;
+        assert!(reserved(&path));
+        fs::create_dir(path.join("sub"))?;
+        fs::write(path.join("sub/file"), b"plain")?;
+        drop(folder);
+        assert!(!path.exists());
+        assert!(!reserved(&path));
+        assert_eq!(fs::read_dir(&t.0)?.count(), 0, "nothing left beside it");
+        Ok(())
+    }
+
+    #[test]
+    fn a_kept_folder_is_renamed_and_no_longer_reserved() -> TestResult {
+        let t = TempDir::new()?;
+        let (path, out) = (t.0.join("out.partial"), t.0.join("out"));
+        let folder = NewFolder::create(&path, 0o700)?;
+        fs::write(path.join("file"), b"plain")?;
+        let mut ran = false;
+        folder.rename_and_keep(&out, || ran = true)?;
+        assert!(ran);
+        assert!(!reserved(&path));
+        assert!(!path.exists());
+        assert_eq!(fs::read(out.join("file"))?, b"plain");
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_renamed_is_removed() -> TestResult {
+        let t = TempDir::new()?;
+        let (path, out) = (t.0.join("out.partial"), t.0.join("out"));
+        fs::create_dir(&out)?;
+        fs::write(out.join("mine"), b"keep")?;
+        let folder = NewFolder::create(&path, 0o700)?;
+        fs::write(path.join("file"), b"plain")?;
+        assert!(folder.rename_and_keep(&out, || ()).is_err());
+        assert!(!path.exists());
+        assert!(!reserved(&path));
+        assert_eq!(fs::read(out.join("mine"))?, b"keep");
+        Ok(())
+    }
+
+    #[test]
+    fn removing_a_reserved_folder_spares_a_replacement() -> TestResult {
+        let t = TempDir::new()?;
+        let path = t.0.join("out.partial");
+        fs::create_dir(&path)?;
+        fs::write(path.join("file"), b"ours")?;
+        let meta = fs::symlink_metadata(&path)?;
+        let ours = Reserved {
+            path: path.clone(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            folder: true,
+        };
+        // Moved aside, not removed, so the replacement gets a new inode.
+        fs::rename(&path, t.0.join("moved"))?;
+        fs::create_dir(&path)?;
+        fs::write(path.join("theirs"), b"someone else's")?;
+        ours.remove();
+        assert_eq!(fs::read(path.join("theirs"))?, b"someone else's");
+        fs::remove_dir_all(&path)?;
+        fs::rename(t.0.join("moved"), &path)?;
+        ours.remove();
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&t.0)?.count(), 0, "nothing left beside it");
         Ok(())
     }
 

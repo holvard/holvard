@@ -71,11 +71,11 @@ pub fn set_stop_message(message: Option<String>) {
 }
 
 /// Handles Ctrl-C, a closed terminal and termination requests from here
-/// on: a background thread removes the files this run created and has not
-/// kept, leaves the alternate screen if it is showing, prints the stop
-/// message, and then ends the program as the signal would have. Without
-/// this, Ctrl-C on a card would leave a blank screen, and an unfinished
-/// vault that blocks the next run.
+/// on: a background thread removes the files and folders this run created
+/// and has not kept, leaves the alternate screen if it is showing, prints
+/// the stop message, and then ends the program as the signal would have.
+/// Without this, Ctrl-C on a card would leave a blank screen, an unfinished
+/// vault that blocks the next run, or half-recovered files on disk.
 pub fn handle_interrupts() -> io::Result<()> {
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
     std::thread::spawn(move || {
@@ -85,8 +85,9 @@ pub fn handle_interrupts() -> io::Result<()> {
             // the restored screen.
             begin_stop();
             let _guard = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
-            // Files this run created and has not kept go first; held
-            // until the program ends, so none can be kept after this.
+            // Files and folders this run created and has not kept go
+            // first; held until the program ends, so none can be kept
+            // after this.
             let _files = crate::disk::remove_unkept();
             let left_alternate = ALTERNATE.swap(false, Ordering::SeqCst);
             if left_alternate && let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {

@@ -55,6 +55,16 @@ pub fn run(folder: &Path, out: Option<&Path>, cards_file: Option<&Path>) -> Resu
     screen::set_stop_message(Some("stopped; no vault was saved".into()));
     // Scan first, so sizes are known before anything big is allocated.
     let scanned = pack::scan(folder, &pack::LIMITS).map_err(|e| Failure(e.to_string()))?;
+    // The outputs exist already, so one inside the folder would be packed
+    // into the vault, empty.
+    for file in std::iter::once(&vault_file).chain(cards_out.as_ref()) {
+        if scanned.holds(file.id()) {
+            return Err(Failure(format!(
+                "{} is inside the folder being packed; save it somewhere else",
+                file.path().display()
+            )));
+        }
+    }
     if scanned.bytes > BIG_NOTE {
         eprintln!(
             "holvard: note: {} MiB of files. Creating needs up to three times that in memory \
