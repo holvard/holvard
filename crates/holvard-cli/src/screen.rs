@@ -21,7 +21,7 @@ use std::io::{self, IsTerminal as _, Read, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
 use signal_hook::iterator::Signals;
 
 use zeroize::{Zeroize as _, Zeroizing};
@@ -70,14 +70,16 @@ pub fn set_stop_message(message: Option<String>) {
     }
 }
 
-/// Handles Ctrl-C, a closed terminal and termination requests from here
-/// on: a background thread removes the files and folders this run created
+/// Handles Ctrl-C, Ctrl-\, Ctrl-Z, a closed terminal and termination
+/// requests from here on: a background thread removes the files and folders this run created
 /// and has not kept, leaves the alternate screen if it is showing, prints
 /// the stop message, and then ends the program as the signal would have.
+/// Ctrl-Z ends it too: pausing would hand the terminal back to the shell
+/// with a card still on it.
 /// Without this, Ctrl-C on a card would leave a blank screen, an unfinished
 /// vault that blocks the next run, or half-recovered files on disk.
 pub fn handle_interrupts() -> io::Result<()> {
-    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP])?;
     std::thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
             // Stop all terminal writes first and keep the lock until the
@@ -101,9 +103,11 @@ pub fn handle_interrupts() -> io::Result<()> {
                 let newline = if left_alternate { "" } else { "\n" };
                 eprintln!("{newline}holvard: {message}");
             }
-            let _ = signal_hook::low_level::emulate_default_handler(signal);
-            // Not reached for these signals; the shell's code for Ctrl-C.
-            std::process::exit(130);
+            if signal != SIGTSTP {
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+            }
+            // Reached only for Ctrl-Z: the shell's code for a stop by it.
+            std::process::exit(128_i32.saturating_add(signal));
         }
     });
     Ok(())

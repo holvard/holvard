@@ -62,7 +62,8 @@ Options:
   -V, --version        Show the version
 
 Cards are shown on the terminal's second screen, so they don't stay in its
-history. Ctrl-C stops at any time and puts the screen back.
+history. Ctrl-C (or Ctrl-\\ or Ctrl-Z) stops at any time and puts the
+screen back.
 Memory: create needs up to three times the folder's size, recover about
 twice the vault's size.";
 
@@ -93,7 +94,23 @@ type just the first four letters of each word.
 
 Memory: recovering needs about twice the vault's size.";
 
+/// Turns off core dumps for this process, so a crash or Ctrl-\ cannot
+/// write the secret, the cards or the files to disk. Both limits go to 0,
+/// so nothing later in the process can raise them again.
+fn no_core_dumps() -> std::io::Result<()> {
+    let none = rustix::process::Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Core, none)?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
+    // First, before any secret exists.
+    if let Err(e) = no_core_dumps() {
+        eprintln!("holvard: note: cannot turn off core dumps: {e}");
+    }
     let command = match args::parse(std::env::args_os().skip(1)) {
         Ok(command) => command,
         Err(args::UsageError(message)) => {
@@ -154,6 +171,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_dumps_are_turned_off() -> std::io::Result<()> {
+        no_core_dumps()?;
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
+        assert_eq!(limit.current, Some(0));
+        assert_eq!(limit.maximum, Some(0));
+        Ok(())
+    }
 
     #[test]
     fn file_counts_read_naturally() {

@@ -391,6 +391,12 @@ fn ctrl_c_on_card_screen(args: &[&str], cwd: &Path) -> common::Result<String> {
 /// each of `keys` (half a second apart) once the alternate screen is
 /// showing, and returns everything the terminal received.
 fn type_on_card_screen(args: &[&str], cwd: &Path, keys: &[&[u8]]) -> common::Result<String> {
+    Ok(type_and_wait(args, cwd, keys)?.0)
+}
+
+/// `type_on_card_screen`, also saying whether the program ended by itself
+/// within 10 s of the last key (instead of being killed).
+fn type_and_wait(args: &[&str], cwd: &Path, keys: &[&[u8]]) -> common::Result<(String, bool)> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
     let log = cwd.join("terminal.log");
@@ -434,8 +440,10 @@ fn type_on_card_screen(args: &[&str], cwd: &Path, keys: &[&[u8]]) -> common::Res
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     // Give it up to 10 s to stop; then make sure it does.
+    let mut ended = false;
     for _ in 0..100 {
         if child.try_wait()?.is_some() {
+            ended = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -443,7 +451,10 @@ fn type_on_card_screen(args: &[&str], cwd: &Path, keys: &[&[u8]]) -> common::Res
     let _ = child.kill();
     drop(stdin);
     child.wait()?;
-    Ok(String::from_utf8_lossy(&fs::read(&log)?).into_owned())
+    Ok((
+        String::from_utf8_lossy(&fs::read(&log)?).into_owned(),
+        ended,
+    ))
 }
 
 /// What the terminal shows after the alternate screen was entered.
@@ -710,5 +721,36 @@ fn ctrl_c_while_unpacking_leaves_nothing() -> TestResult {
     for name in ["out", "out.partial", "out.partial.removing"] {
         assert!(!left.iter().any(|n| n == name), "{name} left: {left:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn ctrl_backslash_on_a_card_restores_the_terminal_and_saves_nothing() -> TestResult {
+    let t = TempDir::new()?;
+    sample(&t.0)?;
+    let (log, ended) = type_and_wait(&["create", "docs"], &t.0, &[b"\x1c"])?;
+    assert!(ended, "holvard did not end");
+    let after = after_alternate(&log).ok_or("no alternate screen")?;
+    assert!(
+        after.contains("\x1b[?1049lholvard: stopped; no vault was saved"),
+        "{after:?}"
+    );
+    assert!(!t.0.join("vault.age").exists());
+    Ok(())
+}
+
+#[test]
+fn ctrl_z_on_a_card_stops_instead_of_pausing() -> TestResult {
+    let t = TempDir::new()?;
+    sample(&t.0)?;
+    // Paused, the terminal would go back to the shell with a card on it.
+    let (log, ended) = type_and_wait(&["create", "docs"], &t.0, &[b"\x1a"])?;
+    assert!(ended, "holvard paused instead of ending");
+    let after = after_alternate(&log).ok_or("no alternate screen")?;
+    assert!(
+        after.contains("\x1b[?1049lholvard: stopped; no vault was saved"),
+        "{after:?}"
+    );
+    assert!(!t.0.join("vault.age").exists());
     Ok(())
 }

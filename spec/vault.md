@@ -112,6 +112,13 @@ inside the libraries it uses are freed without wiping: in age and scrypt
 (see the note at the top of `crates/holvard-core/src/vault.rs`), and in
 the zip and deflate code that packs and unpacks the contents.
 
+Wiping does not help once memory is copied elsewhere. Holvard turns off
+core dumps at startup, so a crash or Ctrl-\ cannot write that memory to a
+file. It does not lock memory, so the system may still move it to swap;
+locking needs code Holvard's rules forbid (`unsafe`). An encrypted swap
+(the default on macOS and on most Linux installs with full-disk
+encryption) closes that gap.
+
 ## Recovery with standard tools
 
 ```sh
